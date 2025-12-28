@@ -8,7 +8,7 @@ As part of this work, a web-based traffic control simulator was developed, inten
 
 3. **Communication**: REST API + WebSocket for real-time updates
 
-## 2.2 Key components:
+## Key components:
 1. **Backend**:
 - ```traffic_model.py``` - main simulation model
 
