@@ -96,3 +96,21 @@ As part of this work, a web-based traffic control simulator was developed, inten
 - Color indication of traffic light status
 - Displaying queues in front of traffic lights
 - Informative tips and statuses
+
+## How to run
+1. Run the backend:
+```
+cd backend
+```
+```
+pyhton main.py
+```
+2. Run the frontend:
+```
+cd frontend
+```
+``` 
+nmp start
+```
+3. Check ```http://localhost:3000/``` for app
+4. Check ```http://localhost:8000/docs#/``` for docs
