@@ -18,10 +18,12 @@ const ControlPanel = ({
     grid_width: 50,
     grid_height: 50,
     road_config: 'crossroad',
+    algorithm_config: {}
   });
 
   const [algorithms, setAlgorithms] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState('');
 
   useEffect(() => {
     const loadAlgorithms = async () => {
@@ -36,26 +38,60 @@ const ControlPanel = ({
     loadAlgorithms();
   }, []);
 
-  const handleConfigChange = (key, value) => {
+  const handleConfigChange = async (key, value) => {
     const newConfig = { ...config, [key]: value };
     setConfig(newConfig);
+
+    // Отправляем обновление на сервер
     if (onConfigUpdate) {
-      onConfigUpdate(newConfig);
+      setUpdateStatus('updating...');
+      try {
+        await onConfigUpdate(newConfig);
+        setUpdateStatus('updated ✓');
+        setTimeout(() => setUpdateStatus(''), 2000);
+      } catch (error) {
+        setUpdateStatus('error!');
+        console.error('Error updating config:', error);
+      }
     }
   };
 
-  const handleAlgorithmChange = async (algorithm) => {
+  const handleAlgorithmChange = async (algorithmId) => {
     if (!simulationId) return;
 
     setIsLoading(true);
+    setUpdateStatus('changing algorithm...');
+
     try {
-      await simulationAPI.changeAlgorithm(simulationId, algorithm);
-      handleConfigChange('algorithm', algorithm);
-      if (onAlgorithmChange) {
-        onAlgorithmChange(algorithm);
+      // Находим выбранный алгоритм
+      const selectedAlgo = algorithms.find(a => a.id === algorithmId);
+
+      // Создаем конфиг для алгоритма
+      const algoConfig = {};
+      if (selectedAlgo && selectedAlgo.parameters) {
+        selectedAlgo.parameters.forEach(param => {
+          algoConfig[param.name] = param.default;
+        });
       }
+
+      // Отправляем запрос на смену алгоритма
+      await simulationAPI.changeAlgorithm(simulationId, algorithmId, algoConfig);
+
+      // Обновляем локальное состояние
+      setConfig(prev => ({ ...prev, algorithm: algorithmId, algorithm_config: algoConfig }));
+
+      if (onAlgorithmChange) {
+        onAlgorithmChange(algorithmId);
+      }
+
+      setUpdateStatus('algorithm changed ✓');
+      setTimeout(() => setUpdateStatus(''), 2000);
     } catch (error) {
       console.error('Error changing algorithm:', error);
+      setUpdateStatus('error changing algorithm!');
+      if (error.response) {
+        console.error('Server response:', error.response.data);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -65,12 +101,16 @@ const ControlPanel = ({
     if (!simulationId) return;
 
     try {
-      await simulationAPI.stepSimulation(simulationId, 10);
+      setUpdateStatus('stepping...');
+      await simulationAPI.stepSimulation(simulationId, 1);
       if (onStep) {
         onStep();
       }
+      setUpdateStatus('step completed ✓');
+      setTimeout(() => setUpdateStatus(''), 1000);
     } catch (error) {
       console.error('Error stepping simulation:', error);
+      setUpdateStatus('step error!');
     }
   };
 
@@ -81,8 +121,13 @@ const ControlPanel = ({
       padding: '20px',
       boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
     }}>
-      <h3 style={{ marginBottom: '20px', color: '#2c3e50' }}>
-        ⚙️ Control Panel
+      <h3 style={{ marginBottom: '20px', color: '#2c3e50', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>⚙️ Control Panel</span>
+        {updateStatus && (
+          <span style={{ fontSize: '12px', color: updateStatus.includes('error') ? '#e74c3c' : '#27ae60' }}>
+            {updateStatus}
+          </span>
+        )}
       </h3>
 
       <div style={{ marginBottom: '20px' }}>
@@ -129,7 +174,7 @@ const ControlPanel = ({
             opacity: isRunning ? 0.5 : 1,
           }}
         >
-          ⏭️ Step +10
+          ⏭️ Single Step
         </button>
       </div>
 

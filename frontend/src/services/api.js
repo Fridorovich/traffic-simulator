@@ -19,8 +19,17 @@ export const simulationAPI = {
   stepSimulation: (simId, steps = 1) =>
     api.post(`/api/simulation/${simId}/step?steps=${steps}`),
 
-  updateConfig: (simId, config) =>
-    api.post(`/api/simulation/${simId}/config`, config),
+  updateConfig: (simId, config) => {
+    // Отправляем только изменяемые параметры
+    const updateData = {
+      num_vehicles: config.num_vehicles,
+      spawn_rate: config.spawn_rate,
+      simulation_speed: config.simulation_speed,
+      road_config: config.road_config,
+      algorithm_config: config.algorithm_config || {}
+    };
+    return api.post(`/api/simulation/${simId}/config`, updateData);
+  },
 
   getMetrics: (simId, limit = 100, aggregated = false) =>
     api.get(`/api/simulation/${simId}/metrics?limit=${limit}&aggregated=${aggregated}`),
@@ -30,8 +39,8 @@ export const simulationAPI = {
 
   changeAlgorithm: (simId, algorithm, config = {}) =>
     api.post(`/api/simulation/${simId}/algorithm/change`, {
-      algorithm,
-      config
+      algorithm: algorithm,
+      config: config
     }),
 
   getAlgorithms: () =>

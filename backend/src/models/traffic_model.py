@@ -178,11 +178,19 @@ class TrafficModel(mesa.Model):
         """Main simulation step"""
         self.schedule.step()
 
+        if len(self.vehicles) < self.config["num_vehicles"] * 1.5:
+            if random.random() < self.config["spawn_rate"] / 10:
+                self._spawn_vehicle(self._get_next_vehicle_id())
+
         self.datacollector.collect(self)
-
         self._update_historical_metrics()
-
         self.steps += 1
+
+    def _get_next_vehicle_id(self):
+        """Get next available vehicle ID"""
+        if not self.vehicles:
+            return 0
+        return max([v.unique_id for v in self.vehicles]) + 1
 
     def _update_historical_metrics(self):
         """Update historical metrics"""

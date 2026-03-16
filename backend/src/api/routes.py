@@ -6,6 +6,8 @@ from typing import Dict, List, Any, Optional
 import asyncio
 from backend.src.models.traffic_model import TrafficModel
 from backend.src.models.algorithms import AlgorithmFactory
+import pandas as pd
+import numpy as np
 
 app = FastAPI(title="Traffic Simulator API")
 
@@ -48,18 +50,43 @@ async def create_simulation(config: SimulationConfig):
 
 
 @app.post("/api/simulation/{sim_id}/algorithm/change")
-async def change_algorithm(sim_id: str, algorithm: str, config: Dict = None):
+async def change_algorithm(sim_id: str, request: Dict):
     """Change control algorithm"""
     if sim_id not in active_simulations:
         return {"error": "Simulation not found"}
 
     model = active_simulations[sim_id]
-    model.change_algorithm(algorithm, config or {})
+
+    # Извлекаем алгоритм из request
+    algorithm = request.get("algorithm")
+    config = request.get("config", {})
+
+    if not algorithm:
+        return {"error": "Algorithm not specified"}
+
+    # Меняем алгоритм
+    model.config["algorithm"] = algorithm
+    model.config["algorithm_config"] = config
+
+    # Обновляем алгоритм для всех светофоров
+    for light in model.traffic_lights:
+        light.algorithm_type = algorithm
+        # Сбрасываем таймеры для нового алгоритма
+        light.timer = 0
+        if algorithm == "static":
+            light.green_duration = config.get("green_duration", 30)
+            light.yellow_duration = config.get("yellow_duration", 5)
+            light.red_duration = config.get("red_duration", 35)
+        elif algorithm == "adaptive":
+            light.green_duration = config.get("base_green_time", 20)
+        elif algorithm == "coordinated":
+            light.green_duration = config.get("base_green_time", 25)
 
     return {
         "message": f"Algorithm changed to {algorithm}",
         "algorithm": algorithm,
-        "config": config
+        "config": config,
+        "current_step": model.steps
     }
 
 
@@ -115,60 +142,103 @@ async def update_config(sim_id: str, config_update: Dict):
         "road_config", "algorithm_config"
     ]
 
+    # Обновляем параметры
     for param in allowed_params:
         if param in config_update:
             model.config[param] = config_update[param]
 
-    if "algorithm" in config_update:
-        algorithm_config = config_update.get("algorithm_config", {})
-        model.change_algorithm(config_update["algorithm"], algorithm_config)
+            # Специальная обработка для num_vehicles
+            if param == "num_vehicles":
+                current_vehicles = len(model.vehicles)
+                target_vehicles = config_update["num_vehicles"]
+
+                if target_vehicles > current_vehicles:
+                    # Добавляем новые машины
+                    vehicles_to_add = target_vehicles - current_vehicles
+                    for i in range(vehicles_to_add):
+                        new_id = max([v.unique_id for v in model.vehicles], default=0) + 1
+                        model._spawn_vehicle(new_id)
+                elif target_vehicles < current_vehicles:
+                    # Удаляем лишние машины
+                    vehicles_to_remove = current_vehicles - target_vehicles
+                    for _ in range(vehicles_to_remove):
+                        if model.vehicles:
+                            vehicle = model.vehicles[-1]
+                            model.vehicles.remove(vehicle)
+                            model.schedule.remove(vehicle)
+                            model.grid.remove_agent(vehicle)
 
     return {
         "message": "Configuration updated successfully",
-        "updated_config": {k: v for k, v in model.config.items() if k in allowed_params or k == "algorithm"},
+        "updated_config": {
+            "num_vehicles": len(model.vehicles),
+            "spawn_rate": model.config.get("spawn_rate"),
+            "simulation_speed": model.config.get("simulation_speed"),
+            "algorithm": model.config.get("algorithm"),
+            "road_config": model.config.get("road_config")
+        },
         "current_step": model.steps
     }
 
 
-@app.get("/api/simulation/{sim_id}/metrics")
-async def get_metrics(sim_id: str, limit: int = 100, aggregated: bool = False):
-    """Get simulation metrics"""
+@app.get("/api/simulation/{sim_id}/agent_metrics")
+async def get_agent_metrics(sim_id: str, agent_type: str = "vehicle", limit: int = 50):
+    """Get individual agent metrics"""
     if sim_id not in active_simulations:
         return {"error": "Simulation not found"}
 
     model = active_simulations[sim_id]
 
-    if aggregated:
-        df = model.datacollector.get_model_vars_dataframe()
+    try:
+        df = model.datacollector.get_agent_vars_dataframe()
+    except Exception as e:
+        print(f"Error getting agent vars dataframe: {e}")
+        return {"agent_metrics": [], "total_agents": 0}
 
-        if df.empty:
-            return {"metrics": [], "aggregated": {}}
+    if df.empty:
+        return {"agent_metrics": [], "total_agents": 0}
 
-        recent_df = df.tail(limit)
+    agent_metrics = []
 
-        aggregated_metrics = {
-            "avg_waiting_time": float(recent_df["Avg_Waiting_Time"].mean()),
-            "max_waiting_time": float(recent_df["Avg_Waiting_Time"].max()),
-            "min_waiting_time": float(recent_df["Avg_Waiting_Time"].min()),
-            "avg_delay": float(recent_df["Total_Delay"].mean()),
-            "max_delay": float(recent_df["Total_Delay"].max()),
-            "total_throughput": int(recent_df["Throughput"].sum()),
-            "avg_speed": float(recent_df["Avg_Speed"].mean()),
-            "avg_vehicles": float(recent_df["Total_Vehicles"].mean()),
-            "algorithm": model.config["algorithm"]
-        }
+    # Безопасный способ получения данных агентов
+    try:
+        if isinstance(df.index, pd.MultiIndex):
+            # Получаем уникальные ID агентов
+            agent_ids = df.index.get_level_values(0).unique()
 
-        return {
-            "metrics": recent_df.to_dict(orient="records"),
-            "aggregated": aggregated_metrics,
-            "current_step": model.steps
-        }
-    else:
-        df = model.datacollector.get_model_vars_dataframe()
-        return {
-            "metrics": df.tail(limit).to_dict(orient="records"),
-            "current_step": model.steps
-        }
+            for agent_id in agent_ids:
+                try:
+                    # Получаем данные для конкретного агента
+                    agent_data = df.xs(agent_id, level=0)
+
+                    if not agent_data.empty:
+                        # Берем последнюю запись
+                        latest = agent_data.iloc[-1].to_dict()
+
+                        # Фильтруем по типу если нужно
+                        if agent_type != "all":
+                            agent_type_value = latest.get("Type", "")
+                            if (agent_type == "vehicle" and "Vehicle" not in agent_type_value) or \
+                                    (agent_type == "traffic_light" and "TrafficLight" not in agent_type_value):
+                                continue
+
+                        latest["agent_id"] = int(agent_id) if isinstance(agent_id, (int, np.integer)) else str(agent_id)
+                        agent_metrics.append(latest)
+
+                except Exception as e:
+                    print(f"Error processing agent {agent_id}: {e}")
+                    continue
+    except Exception as e:
+        print(f"Error processing agent metrics: {e}")
+        return {"agent_metrics": [], "total_agents": 0}
+
+    # Сортируем и ограничиваем количество
+    agent_metrics = agent_metrics[:limit]
+
+    return {
+        "agent_metrics": agent_metrics,
+        "total_agents": len(agent_metrics)
+    }
 
 
 @app.get("/api/simulation/{sim_id}/agent_metrics")
