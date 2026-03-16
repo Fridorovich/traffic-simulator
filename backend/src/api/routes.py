@@ -309,16 +309,23 @@ async def simulation_updater(sim_id: str):
 @app.websocket("/ws/simulation/{sim_id}")
 async def websocket_endpoint(websocket: WebSocket, sim_id: str):
     """WebSocket for real-time updates"""
+    client_id = id(websocket)  # Уникальный ID для каждого соединения
+    print(f"New WebSocket connection request for {sim_id} from client {client_id}")
+
     await websocket.accept()
 
-    print(f"WebSocket connected for simulation {sim_id}")
+    print(f"WebSocket accepted for {sim_id} from client {client_id}")
 
     # Добавляем соединение в список
     if sim_id not in websocket_connections:
         websocket_connections[sim_id] = []
-    websocket_connections[sim_id].append(websocket)
 
-    print(f"Total connections for {sim_id}: {len(websocket_connections[sim_id])}")
+    # Проверяем, нет ли уже такого соединения
+    if websocket not in websocket_connections[sim_id]:
+        websocket_connections[sim_id].append(websocket)
+        print(f"Added client {client_id} to {sim_id}. Total connections: {len(websocket_connections[sim_id])}")
+    else:
+        print(f"Client {client_id} already in connections")
 
     # Запускаем фоновую задачу если еще не запущена
     if sim_id not in background_tasks and sim_id in active_simulations:
@@ -332,57 +339,51 @@ async def websocket_endpoint(websocket: WebSocket, sim_id: str):
             model = active_simulations[sim_id]
             state = model.get_simulation_state()
             await websocket.send_json(state)
-            print(f"Sent initial state for {sim_id}")
+            print(f"Sent initial state to client {client_id}")
 
         # Обрабатываем входящие сообщения
         while True:
             try:
-                # Ждем сообщение от клиента с таймаутом
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
 
                 try:
                     message = json.loads(data)
-                    print(f"Received message from client: {message.get('type')}")
 
                     if message.get("type") == "ping":
-                        # Отвечаем на ping
                         await websocket.send_json({"type": "pong"})
-                        print("Sent pong to client")
+                        print(f"Pong sent to client {client_id}")
 
                 except json.JSONDecodeError:
-                    # Игнорируем некорректные сообщения
                     pass
 
             except asyncio.TimeoutError:
-                # Отправляем ping если долго нет сообщений
+                # Проверяем, живо ли соединение
                 try:
                     await websocket.send_json({"type": "ping"})
-                    print("Sent ping to client (timeout)")
                 except:
                     break
 
             except WebSocketDisconnect:
-                print(f"WebSocket disconnected for {sim_id}")
+                print(f"Client {client_id} disconnected normally")
                 break
             except Exception as e:
-                print(f"Error in WebSocket loop: {e}")
+                print(f"Error with client {client_id}: {e}")
                 break
 
     except Exception as e:
-        print(f"WebSocket error for {sim_id}: {e}")
+        print(f"WebSocket error for client {client_id}: {e}")
     finally:
-        # Удаляем соединение из списка
+        # Удаляем соединение
         if sim_id in websocket_connections and websocket in websocket_connections[sim_id]:
             websocket_connections[sim_id].remove(websocket)
-            print(
-                f"WebSocket removed for {sim_id}. Remaining connections: {len(websocket_connections.get(sim_id, []))}")
+            print(f"Removed client {client_id}. Remaining: {len(websocket_connections.get(sim_id, []))}")
 
         # Если больше нет соединений, останавливаем фоновую задачу
         if sim_id in websocket_connections and len(websocket_connections[sim_id]) == 0:
             if sim_id in background_tasks:
                 background_tasks[sim_id].cancel()
                 del background_tasks[sim_id]
-                print(f"Stopped background task for {sim_id} (no connections)")
+                print(f"Stopped background task for {sim_id}")
 
         try:
             await websocket.close()

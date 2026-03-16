@@ -22,8 +22,11 @@ export const simulationAPI = {
   updateConfig: (simId, config) =>
     api.post(`/api/simulation/${simId}/config`, config),
 
-  getMetrics: (simId) =>
-    api.get(`/api/simulation/${simId}/metrics`),
+  getMetrics: (simId, limit = 100, aggregated = false) =>
+    api.get(`/api/simulation/${simId}/metrics?limit=${limit}&aggregated=${aggregated}`),
+
+  getAgentMetrics: (simId, agentType = 'vehicle', limit = 50) =>
+    api.get(`/api/simulation/${simId}/agent_metrics?agent_type=${agentType}&limit=${limit}`),
 
   changeAlgorithm: (simId, algorithm, config = {}) =>
     api.post(`/api/simulation/${simId}/algorithm/change`, {
@@ -33,6 +36,18 @@ export const simulationAPI = {
 
   getAlgorithms: () =>
     api.get('/api/algorithms'),
+
+  pauseSimulation: (simId) =>
+    api.post(`/api/simulation/${simId}/pause`),
+
+  resumeSimulation: (simId, speed = 1.0) =>
+    api.post(`/api/simulation/${simId}/resume`, { speed }),
+
+  deleteSimulation: (simId) =>
+    api.delete(`/api/simulation/${simId}`),
+
+  listSimulations: () =>
+    api.get('/api/simulations'),
 };
 
 export default api;
