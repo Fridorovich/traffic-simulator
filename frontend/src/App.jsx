@@ -15,6 +15,13 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  useEffect(() => {
+      if (simulationState && simulationState.metrics) {
+        setMetrics(simulationState.metrics);
+        setHistoricalMetrics(simulationState.historical_metrics || {});
+      }
+  }, [simulationState]);
+
   const { isConnected, sendStep } = useWebSocket(
     simulationId,
     (data) => {

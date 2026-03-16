@@ -5,18 +5,55 @@ const useWebSocket = (simId, onMessage, isRunning = false) => {
   const [error, setError] = useState(null);
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
-  const stepIntervalRef = useRef(null);
+  const pingIntervalRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+  const maxReconnectAttempts = 5;
 
-  const connect = useCallback(() => {
-    if (!simId) return;
+  const disconnect = useCallback(() => {
+    // Очищаем все таймеры
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
 
     if (wsRef.current) {
-      wsRef.current.close();
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onopen = null;
+
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close(1000, "Normal closure");
+      }
+      wsRef.current = null;
+      setIsConnected(false);
+    }
+  }, []);
+
+  const connect = useCallback(() => {
+    if (!simId || !isRunning) {
+      disconnect();
+      return;
+    }
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.log('WebSocket already connected');
+      return;
+    }
+
+    if (wsRef.current) {
+      disconnect();
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname;
-    const wsUrl = `${protocol}//${host}:8000/ws/simulation/${simId}`;
+    const port = '8000';
+    const wsUrl = `${protocol}//${host}:${port}/ws/simulation/${simId}`;
 
     console.log(`Connecting to WebSocket: ${wsUrl}`);
 
@@ -26,120 +63,89 @@ const useWebSocket = (simId, onMessage, isRunning = false) => {
       console.log('WebSocket connected successfully');
       setIsConnected(true);
       setError(null);
+      reconnectAttemptsRef.current = 0;
+
+      ws.send(JSON.stringify({ type: 'ping' }));
+
+      pingIntervalRef.current = setInterval(() => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          console.log('Sending ping');
+          wsRef.current.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 15000);
     };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
 
-        if (data.type === 'ping' || data.type === 'pong') {
+        if (data.type === 'pong') {
+          console.log('Received pong');
           return;
         }
 
         onMessage(data);
       } catch (err) {
-        console.error('Error parsing WebSocket message:', err, event.data);
+        console.error('Error parsing WebSocket message:', err);
       }
     };
 
     ws.onerror = (error) => {
       console.error('WebSocket error:', error);
       setError('WebSocket connection error');
-      setIsConnected(false);
     };
 
     ws.onclose = (event) => {
       console.log(`WebSocket disconnected. Code: ${event.code}, Reason: ${event.reason}`);
       setIsConnected(false);
 
-      if (stepIntervalRef.current) {
-        clearInterval(stepIntervalRef.current);
-        stepIntervalRef.current = null;
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
       }
 
-      if (simId) {
+      if (simId && isRunning && reconnectAttemptsRef.current < maxReconnectAttempts) {
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
+        console.log(`Attempting to reconnect in ${delay}ms... (attempt ${reconnectAttemptsRef.current + 1}/${maxReconnectAttempts})`);
+
         reconnectTimeoutRef.current = setTimeout(() => {
-          console.log('Attempting to reconnect WebSocket...');
+          reconnectAttemptsRef.current += 1;
           connect();
-        }, 2000);
+        }, delay);
+      } else if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
+        setError('Max reconnection attempts reached');
       }
     };
 
     wsRef.current = ws;
-  }, [simId, onMessage]);
-
-  const sendStep = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'step' }));
-    }
-  }, []);
+  }, [simId, onMessage, isRunning, disconnect]);
 
   useEffect(() => {
-    if (isRunning && isConnected) {
-      stepIntervalRef.current = setInterval(() => {
-        sendStep();
-      }, 100);
+    if (simId && isRunning) {
+      connect();
     } else {
-      if (stepIntervalRef.current) {
-        clearInterval(stepIntervalRef.current);
-        stepIntervalRef.current = null;
-      }
+      disconnect();
     }
 
     return () => {
-      if (stepIntervalRef.current) {
-        clearInterval(stepIntervalRef.current);
-      }
+      disconnect();
     };
-  }, [isRunning, isConnected, sendStep]);
+  }, [simId, isRunning, connect, disconnect]);
 
-  const disconnect = useCallback(() => {
+  const reconnect = useCallback(() => {
+    reconnectAttemptsRef.current = 0;
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-
-    if (stepIntervalRef.current) {
-      clearInterval(stepIntervalRef.current);
-      stepIntervalRef.current = null;
-    }
-
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-      setIsConnected(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (simId) {
-      console.log(`Setting up WebSocket for simulation: ${simId}`);
-      connect();
-
-      return () => {
-        console.log(`Cleaning up WebSocket for simulation: ${simId}`);
-        disconnect();
-      };
-    }
-
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-    };
-  }, [simId, connect, disconnect]);
+    connect();
+  }, [connect]);
 
   return {
     isConnected,
     error,
-    sendStep,
     disconnect,
-    connect: () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      connect();
-    },
+    reconnect,
   };
 };
 

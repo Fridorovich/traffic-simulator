@@ -2,9 +2,9 @@ import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import asyncio
-from backend.src.models import TrafficModel
+from backend.src.models.traffic_model import TrafficModel
 from backend.src.models.algorithms import AlgorithmFactory
 
 app = FastAPI(title="Traffic Simulator API")
@@ -19,6 +19,8 @@ app.add_middleware(
 
 active_simulations: Dict[str, TrafficModel] = {}
 websocket_connections: Dict[str, List[WebSocket]] = {}
+background_tasks: Dict[str, asyncio.Task] = {}
+
 
 class SimulationConfig(BaseModel):
     grid_width: int = 50
@@ -29,6 +31,7 @@ class SimulationConfig(BaseModel):
     spawn_rate: float = 0.1
     simulation_speed: float = 1.0
     road_config: str = "crossroad"
+
 
 @app.post("/api/simulation/create")
 async def create_simulation(config: SimulationConfig):
@@ -42,6 +45,7 @@ async def create_simulation(config: SimulationConfig):
         "message": "Simulation created successfully",
         "config": config.dict()
     }
+
 
 @app.post("/api/simulation/{sim_id}/algorithm/change")
 async def change_algorithm(sim_id: str, algorithm: str, config: Dict = None):
@@ -58,12 +62,14 @@ async def change_algorithm(sim_id: str, algorithm: str, config: Dict = None):
         "config": config
     }
 
+
 @app.get("/api/algorithms")
 async def get_algorithms():
     """Get information about available algorithms"""
     return {
         "algorithms": AlgorithmFactory.get_algorithm_info()
     }
+
 
 @app.get("/api/simulation/{sim_id}/state")
 async def get_simulation_state(sim_id: str):
@@ -73,6 +79,7 @@ async def get_simulation_state(sim_id: str):
 
     model = active_simulations[sim_id]
     return model.get_simulation_state()
+
 
 @app.post("/api/simulation/{sim_id}/step")
 async def simulation_step(sim_id: str, steps: int = 1, collect_metrics: bool = True):
@@ -93,6 +100,7 @@ async def simulation_step(sim_id: str, steps: int = 1, collect_metrics: bool = T
         "current_step": model.steps,
         "metrics": model.get_simulation_state()["metrics"] if collect_metrics else None
     }
+
 
 @app.post("/api/simulation/{sim_id}/config")
 async def update_config(sim_id: str, config_update: Dict):
@@ -120,6 +128,7 @@ async def update_config(sim_id: str, config_update: Dict):
         "updated_config": {k: v for k, v in model.config.items() if k in allowed_params or k == "algorithm"},
         "current_step": model.steps
     }
+
 
 @app.get("/api/simulation/{sim_id}/metrics")
 async def get_metrics(sim_id: str, limit: int = 100, aggregated: bool = False):
@@ -161,6 +170,7 @@ async def get_metrics(sim_id: str, limit: int = 100, aggregated: bool = False):
             "current_step": model.steps
         }
 
+
 @app.get("/api/simulation/{sim_id}/agent_metrics")
 async def get_agent_metrics(sim_id: str, agent_type: str = "vehicle", limit: int = 50):
     """Get individual agent metrics"""
@@ -194,6 +204,7 @@ async def get_agent_metrics(sim_id: str, agent_type: str = "vehicle", limit: int
         "total_agents": len(agent_metrics)
     }
 
+
 @app.post("/api/simulation/{sim_id}/pause")
 async def pause_simulation(sim_id: str):
     """Pause simulation (set speed to 0)"""
@@ -207,6 +218,7 @@ async def pause_simulation(sim_id: str):
         "message": "Simulation paused",
         "simulation_speed": 0.0
     }
+
 
 @app.post("/api/simulation/{sim_id}/resume")
 async def resume_simulation(sim_id: str, speed: float = 1.0):
@@ -222,11 +234,16 @@ async def resume_simulation(sim_id: str, speed: float = 1.0):
         "simulation_speed": speed
     }
 
+
 @app.delete("/api/simulation/{sim_id}")
 async def delete_simulation(sim_id: str):
     """Delete simulation"""
     if sim_id not in active_simulations:
         return {"error": "Simulation not found"}
+
+    if sim_id in background_tasks:
+        background_tasks[sim_id].cancel()
+        del background_tasks[sim_id]
 
     del active_simulations[sim_id]
 
@@ -240,57 +257,138 @@ async def delete_simulation(sim_id: str):
 
     return {"message": f"Simulation {sim_id} deleted successfully"}
 
+
+async def simulation_updater(sim_id: str):
+    """Фоновая задача для отправки обновлений"""
+    try:
+        while True:
+            if sim_id in active_simulations and sim_id in websocket_connections:
+                model = active_simulations[sim_id]
+
+                # Проверяем, есть ли активные соединения
+                connections = websocket_connections.get(sim_id, [])
+                if not connections:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # Если симуляция запущена, делаем шаг
+                if model.config.get("simulation_speed", 1) > 0:
+                    model.step()
+
+                # Получаем текущее состояние
+                state = model.get_simulation_state()
+
+                # Отправляем всем подключенным клиентам
+                disconnected = []
+                for connection in connections:
+                    try:
+                        await connection.send_json(state)
+                    except Exception as e:
+                        print(f"Error sending to client: {e}")
+                        disconnected.append(connection)
+
+                # Удаляем отключившиеся соединения
+                for conn in disconnected:
+                    if conn in websocket_connections[sim_id]:
+                        websocket_connections[sim_id].remove(conn)
+
+                # Если все соединения отключились, выходим
+                if len(websocket_connections[sim_id]) == 0:
+                    print(f"No connections left for {sim_id}, stopping background task")
+                    break
+
+            # Ждем перед следующим обновлением (30 FPS для уменьшения нагрузки)
+            await asyncio.sleep(1 / 30)
+
+    except asyncio.CancelledError:
+        print(f"Background task for {sim_id} cancelled")
+    except Exception as e:
+        print(f"Error in background task for {sim_id}: {e}")
+
+
 @app.websocket("/ws/simulation/{sim_id}")
 async def websocket_endpoint(websocket: WebSocket, sim_id: str):
     """WebSocket for real-time updates"""
     await websocket.accept()
 
+    print(f"WebSocket connected for simulation {sim_id}")
+
+    # Добавляем соединение в список
     if sim_id not in websocket_connections:
         websocket_connections[sim_id] = []
     websocket_connections[sim_id].append(websocket)
 
+    print(f"Total connections for {sim_id}: {len(websocket_connections[sim_id])}")
+
+    # Запускаем фоновую задачу если еще не запущена
+    if sim_id not in background_tasks and sim_id in active_simulations:
+        task = asyncio.create_task(simulation_updater(sim_id))
+        background_tasks[sim_id] = task
+        print(f"Started background task for {sim_id}")
+
     try:
+        # Отправляем начальное состояние
         if sim_id in active_simulations:
             model = active_simulations[sim_id]
             state = model.get_simulation_state()
             await websocket.send_json(state)
+            print(f"Sent initial state for {sim_id}")
 
+        # Обрабатываем входящие сообщения
         while True:
             try:
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                # Ждем сообщение от клиента с таймаутом
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
 
-                if data:
-                    try:
-                        message = json.loads(data)
+                try:
+                    message = json.loads(data)
+                    print(f"Received message from client: {message.get('type')}")
 
-                        if message.get("type") == "step":
-                            if sim_id in active_simulations:
-                                model = active_simulations[sim_id]
-                                model.step()
+                    if message.get("type") == "ping":
+                        # Отвечаем на ping
+                        await websocket.send_json({"type": "pong"})
+                        print("Sent pong to client")
 
-                                state = model.get_simulation_state()
-                                await websocket.send_json(state)
-
-                        elif message.get("type") == "ping":
-                            await websocket.send_json({"type": "pong"})
-
-                    except json.JSONDecodeError:
-                        pass
+                except json.JSONDecodeError:
+                    # Игнорируем некорректные сообщения
+                    pass
 
             except asyncio.TimeoutError:
-                continue
+                # Отправляем ping если долго нет сообщений
+                try:
+                    await websocket.send_json({"type": "ping"})
+                    print("Sent ping to client (timeout)")
+                except:
+                    break
 
-    except WebSocketDisconnect:
-        print(f"WebSocket disconnected normally for {sim_id}")
+            except WebSocketDisconnect:
+                print(f"WebSocket disconnected for {sim_id}")
+                break
+            except Exception as e:
+                print(f"Error in WebSocket loop: {e}")
+                break
+
     except Exception as e:
         print(f"WebSocket error for {sim_id}: {e}")
     finally:
+        # Удаляем соединение из списка
         if sim_id in websocket_connections and websocket in websocket_connections[sim_id]:
             websocket_connections[sim_id].remove(websocket)
+            print(
+                f"WebSocket removed for {sim_id}. Remaining connections: {len(websocket_connections.get(sim_id, []))}")
+
+        # Если больше нет соединений, останавливаем фоновую задачу
+        if sim_id in websocket_connections and len(websocket_connections[sim_id]) == 0:
+            if sim_id in background_tasks:
+                background_tasks[sim_id].cancel()
+                del background_tasks[sim_id]
+                print(f"Stopped background task for {sim_id} (no connections)")
+
         try:
             await websocket.close()
         except:
             pass
+
 
 @app.get("/api/simulations")
 async def list_simulations():
@@ -310,7 +408,8 @@ async def list_simulations():
                 "total_vehicles": len(model.vehicles),
                 "avg_waiting_time": model._calculate_avg_waiting_time(),
                 "current_step": model.steps
-            }
+            },
+            "connected_clients": len(websocket_connections.get(sim_id, []))
         })
 
     return {

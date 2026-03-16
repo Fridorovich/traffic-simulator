@@ -220,7 +220,8 @@ class TrafficModel(mesa.Model):
                     "color": v.color,
                     "speed": float(v.speed),
                     "waiting_time": v.waiting_time,
-                    "current_segment": v.current_segment
+                    "current_segment": v.current_segment,
+                    "stopped": v.stopped
                 }
                 for v in self.vehicles
             ],
@@ -229,10 +230,10 @@ class TrafficModel(mesa.Model):
             ],
             "metrics": {
                 "total_vehicles": len(self.vehicles),
-                "avg_waiting_time": self._calculate_avg_waiting_time(),
-                "total_delay": self._calculate_total_delay(),
+                "avg_waiting_time": float(self._calculate_avg_waiting_time()),
+                "total_delay": float(self._calculate_total_delay()),
                 "throughput": self._calculate_throughput(),
-                "avg_speed": self._calculate_avg_speed(),
+                "avg_speed": float(self._calculate_avg_speed()),
                 "completed_vehicles": self.completed_vehicles,
                 "spawned_vehicles": self.spawned_vehicles,
                 "current_step": self.steps
