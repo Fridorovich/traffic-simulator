@@ -30,6 +30,22 @@ class VehicleAgent(mesa.Agent):
         self.route = self._calculate_route(spawn_point, self.destination)
         self.current_segment = 0
 
+        self.number_of_stops = 0
+        self.was_stopped_last_step = False
+        self.total_co2_emission = 0.0
+
+        # COPERT coefficients for average passenger car (gasoline, Euro 4)
+        self.COPERT = {
+            'a': 0.001,  # v² coefficient
+            'b': 0.05,  # v coefficient
+            'c': 1.0,  # constant
+            'd': 0.02,  # denominator v coefficient
+            'e': 0.0005,  # denominator v² coefficient
+        }
+
+        # Conversion factor: our speed units to km/h (approximate)
+        self.SPEED_TO_KMPH = 10.0
+
     def _generate_color(self):
         """Generate random color for vehicle"""
         colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD"]
@@ -68,17 +84,58 @@ class VehicleAgent(mesa.Agent):
 
         return [start, (center_x, center_y), end]
 
+    def _calculate_distance(self, pos1: Tuple[float, float], pos2: Tuple[float, float]) -> float:
+        """Calculate Euclidean distance between two positions"""
+        return np.sqrt((pos2[0] - pos1[0]) ** 2 + (pos2[1] - pos1[1]) ** 2)
+
+    def _copert_co2_emission(self, speed: float, distance: float) -> float:
+        """
+        Calculate CO2 emission using COPERT formula
+
+        CO2 [g] = (a*v² + b*v + c) / (1 + d*v + e*v²) * distance
+
+        Args:
+            speed: Vehicle speed in our units
+            distance: Distance traveled in our units
+
+        Returns:
+            CO2 emission in grams
+        """
+        if speed <= 0:
+            return 0.02  # Average idle emission per step in grams
+
+        # Convert speed to km/h for realistic formula
+        v = speed * self.SPEED_TO_KMPH
+
+        # COPERT formula
+        numerator = self.COPERT['a'] * v ** 2 + self.COPERT['b'] * v + self.COPERT['c']
+        denominator = 1 + self.COPERT['d'] * v + self.COPERT['e'] * v ** 2
+
+        # Convert distance to km (assuming our units to km conversion)
+        distance_km = distance * 0.1  # Rough conversion: 1 unit = 0.1 km
+
+        if denominator == 0:
+            return 0
+
+        co2_per_km = numerator / denominator  # g/km
+        return co2_per_km * distance_km
+
     def move(self):
-        """Vehicle movement logic"""
+        """Vehicle movement logic with stop tracking"""
+        is_stopped_now = (self.speed == 0)
+
+        if not self.was_stopped_last_step and is_stopped_now:
+            self.number_of_stops += 1
+            # print(f"Vehicle {self.unique_id} stopped! Total stops: {self.number_of_stops}")
+
         if not self.route or self.current_segment >= len(self.route):
             return
 
         target_pos = self.route[self.current_segment]
 
-        distance = np.sqrt((target_pos[0] - self.position[0]) ** 2 +
-                           (target_pos[1] - self.position[1]) ** 2)
+        distance_to_target = self._calculate_distance(self.position, target_pos)
 
-        if distance < 1.0:
+        if distance_to_target < 1.0:
             self.current_segment += 1
             if self.current_segment >= len(self.route):
                 self.model.vehicle_completed(self)
@@ -88,20 +145,23 @@ class VehicleAgent(mesa.Agent):
         if self.current_segment == 1:
             traffic_light = self.model.get_traffic_light_for_vehicle(self)
             if traffic_light:
-                dist_to_light = np.sqrt((self.position[0] - traffic_light.position[0]) ** 2 +
-                                        (self.position[1] - traffic_light.position[1]) ** 2)
+                dist_to_light = self._calculate_distance(self.position, traffic_light.position)
 
                 if dist_to_light < 8 and traffic_light.state != TrafficLightState.GREEN:
                     self.speed = max(0, self.speed - self.deceleration)
                     if self.speed == 0:
                         self.stopped = True
                         self.waiting_time += 1
+                        self.total_co2_emission += self._copert_co2_emission(0, 0)
+
+                    self.was_stopped_last_step = (self.speed == 0)
                     return
                 else:
                     self.stopped = False
                     if self.speed > 0:
                         self.waiting_time = max(0, self.waiting_time - 1)
 
+        # Movement calculation
         dx = target_pos[0] - self.position[0]
         dy = target_pos[1] - self.position[1]
 
@@ -115,14 +175,31 @@ class VehicleAgent(mesa.Agent):
 
             new_x = self.position[0] + dx * self.speed
             new_y = self.position[1] + dy * self.speed
+            new_position = (new_x, new_y)
 
-            if not self.model.is_position_occupied((new_x, new_y), self.unique_id):
-                self.position = (new_x, new_y)
+            # Calculate distance traveled this step
+            distance_traveled = self._calculate_distance(self.position, new_position)
+
+            if not self.model.is_position_occupied(new_position, self.unique_id):
+                self.position = new_position
+
+                # Calculate CO2 for this movement using COPERT
+                co2_emission = self._copert_co2_emission(self.speed, distance_traveled)
+                self.total_co2_emission += co2_emission
 
         self.total_travel_time += 1
+        self.was_stopped_last_step = (self.speed == 0)
 
     def step(self):
         self.move()
+
+    def get_environmental_metrics(self):
+        """Get environmental metrics for this vehicle"""
+        return {
+            "number_of_stops": self.number_of_stops,
+            "total_co2_g": round(self.total_co2_emission, 2),
+            "total_co2_kg": round(self.total_co2_emission / 1000, 3),
+        }
 
 
 class TrafficLightAgent(mesa.Agent):

@@ -20,7 +20,6 @@ export const simulationAPI = {
     api.post(`/api/simulation/${simId}/step?steps=${steps}`),
 
   updateConfig: (simId, config) => {
-    // Отправляем только изменяемые параметры
     const updateData = {
       num_vehicles: config.num_vehicles,
       spawn_rate: config.spawn_rate,
