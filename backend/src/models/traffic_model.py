@@ -2,11 +2,11 @@ import mesa
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 import random
-from .agents import VehicleAgent, TrafficLightAgent, TrafficLightState
+from .agents import VehicleAgent, TrafficLightAgent, TrafficLightState, LaneDirection
 
 
 class TrafficModel(mesa.Model):
-    """Main traffic simulation model"""
+    """Main traffic simulation model with two-lane system"""
 
     def __init__(self, config: Dict = None):
         super().__init__()
@@ -57,10 +57,7 @@ class TrafficModel(mesa.Model):
                 "Avg_Speed": lambda m: m._calculate_avg_speed(),
                 "Algorithm": lambda m: m.config["algorithm"],
                 "Total_Stops": lambda m: m._calculate_total_stops(),
-                "Avg_Stops_Per_Vehicle": lambda m: m._calculate_average_stops_per_vehicle(),
                 "Total_CO2_g": lambda m: m._calculate_total_co2_emissions(),
-                "Total_CO2_kg": lambda m: m._calculate_total_co2_emissions() / 1000,
-                "Avg_CO2_Per_Vehicle_g": lambda m: m._calculate_average_co2_per_vehicle(),
             },
             agent_reporters={
                 "Type": lambda a: type(a).__name__,
@@ -72,21 +69,23 @@ class TrafficModel(mesa.Model):
                 "CO2_g": lambda a: a.total_co2_emission if hasattr(a, 'total_co2_emission') else 0,
                 "State": lambda a: a.state.value if hasattr(a, 'state') else None,
                 "Queue_Length": lambda a: a.get_queue_length() if hasattr(a, 'get_queue_length') else 0,
+                "Direction": lambda a: a.direction_str if hasattr(a, 'direction_str') else None,
+                "Lane": lambda a: a.lane if hasattr(a, 'lane') else 0,
             }
         )
 
         self.steps = 0
 
     def _generate_road_network(self):
-        """Generate road network (intersection)"""
+        """Generate road network with traffic lights at intersection"""
         center_x = self.config["grid_width"] // 2
         center_y = self.config["grid_height"] // 2
 
         light_positions = [
-            (center_x - 10, center_y, "horizontal"),
-            (center_x + 10, center_y, "horizontal"),
-            (center_x, center_y - 10, "vertical"),
-            (center_x, center_y + 10, "vertical")
+            (center_x - 5, center_y, "horizontal"),
+            (center_x + 5, center_y, "horizontal"),
+            (center_x, center_y - 5, "vertical"),
+            (center_x, center_y + 5, "vertical"),
         ]
 
         algorithm_type = self.config["algorithm"]
@@ -106,28 +105,30 @@ class TrafficModel(mesa.Model):
         for i in range(self.config["num_vehicles"]):
             self._spawn_vehicle(i)
 
-    def _spawn_vehicle(self, vehicle_id: int):
-        """Create new vehicle with spawn point availability check"""
-        # Limit maximum number of vehicles
-        if len(self.vehicles) > 100:  # Don't exceed 100 vehicles
+    def _spawn_vehicle(self, vehicle_id: int) -> bool:
+        """Create new vehicle with lane-based spawning"""
+        if len(self.vehicles) > 100:
             return False
 
-        spawn_points = [
-            (0, self.config["grid_height"] // 2),
-            (self.config["grid_width"] - 1, self.config["grid_height"] // 2),
-            (self.config["grid_width"] // 2, 0),
-            (self.config["grid_width"] // 2, self.config["grid_height"] - 1)
+        grid_width = self.config["grid_width"]
+        grid_height = self.config["grid_height"]
+        center_x = grid_width // 2
+        center_y = grid_height // 2
+        lane_offset = 2.0
+
+        spawn_configs = [
+            (0, center_y - lane_offset, LaneDirection.RIGHT, 0),
+            (grid_width - 1, center_y + lane_offset, LaneDirection.LEFT, 1),
+            (center_x + lane_offset, 0, LaneDirection.DOWN, 1),
+            (center_x - lane_offset, grid_height - 1, LaneDirection.UP, 0),
         ]
 
-        # Shuffle spawn points to try random order
-        random.shuffle(spawn_points)
+        random.shuffle(spawn_configs)
 
-        for spawn_point in spawn_points:
-            # Check if spawn point is occupied
+        for x, y, direction, lane in spawn_configs:
             point_occupied = False
             for vehicle in self.vehicles:
-                if abs(vehicle.position[0] - spawn_point[0]) < 2 and \
-                        abs(vehicle.position[1] - spawn_point[1]) < 2:
+                if abs(vehicle.position[0] - x) < 2 and abs(vehicle.position[1] - y) < 2:
                     point_occupied = True
                     break
 
@@ -135,16 +136,17 @@ class TrafficModel(mesa.Model):
                 vehicle = VehicleAgent(
                     unique_id=vehicle_id,
                     model=self,
-                    spawn_point=spawn_point
+                    spawn_point=(x, y),
+                    lane=lane,
+                    direction=direction
                 )
-
                 self.vehicles.append(vehicle)
                 self.schedule.add(vehicle)
-                self.grid.place_agent(vehicle, spawn_point)
+                self.grid.place_agent(vehicle, (x, y))
                 self.spawned_vehicles += 1
-                return True  # Successfully spawned
+                return True
 
-        return False  # No free spawn points
+        return False
 
     def _get_next_vehicle_id(self) -> int:
         """Get next available vehicle ID"""
@@ -153,29 +155,14 @@ class TrafficModel(mesa.Model):
         return max([v.unique_id for v in self.vehicles]) + 1
 
     def is_position_occupied(self, position: Tuple[float, float], exclude_id: int = None) -> bool:
-        """
-        Check if position is occupied by another vehicle
-        More sophisticated check with direction consideration
-        """
+        """Check if position is occupied by another vehicle"""
         for agent in self.vehicles:
             if agent.unique_id == exclude_id:
                 continue
-
-            # Calculate distance
             distance = np.sqrt((agent.position[0] - position[0]) ** 2 +
                                (agent.position[1] - position[1]) ** 2)
-
-            # Dynamic safe distance based on relative speeds
-            safe_distance = 1.0
-
-            # If vehicles are moving towards each other, increase safe distance
-            if hasattr(agent, 'route') and hasattr(self, 'get_vehicle_by_id'):
-                # This would require more complex logic for head-on collision avoidance
-                pass
-
-            if distance < safe_distance:
+            if distance < 1.0:
                 return True
-
         return False
 
     def vehicle_completed(self, vehicle: VehicleAgent):
@@ -199,9 +186,7 @@ class TrafficModel(mesa.Model):
                 self._spawn_vehicle(self._get_next_vehicle_id())
 
         self.datacollector.collect(self)
-
         self._update_historical_metrics()
-
         self.steps += 1
 
     def _calculate_avg_waiting_time(self) -> float:
@@ -215,14 +200,12 @@ class TrafficModel(mesa.Model):
         """Calculate total delay time"""
         if not self.vehicles:
             return 0.0
-
         total_delay = 0
         for vehicle in self.vehicles:
-            ideal_time = len(vehicle.route) * 10
+            ideal_time = 50
             actual_time = vehicle.total_travel_time
             delay = max(0, actual_time - ideal_time)
             total_delay += delay
-
         return total_delay
 
     def _calculate_throughput(self) -> int:
@@ -240,22 +223,20 @@ class TrafficModel(mesa.Model):
         """Calculate total number of stops across all vehicles"""
         if not self.vehicles:
             return 0
-        total = sum(vehicle.number_of_stops for vehicle in self.vehicles)
-        # print(f"Total stops calculated: {total} from {len(self.vehicles)} vehicles")
-        return total
+        return int(sum(vehicle.number_of_stops for vehicle in self.vehicles))
 
     def _calculate_average_stops_per_vehicle(self) -> float:
         """Calculate average stops per vehicle"""
         if not self.vehicles:
             return 0.0
         total_stops = self._calculate_total_stops()
-        return total_stops / len(self.vehicles)
+        return float(total_stops) / len(self.vehicles)
 
     def _calculate_total_co2_emissions(self) -> float:
         """Calculate total CO2 emissions in grams"""
         if not self.vehicles:
             return 0.0
-        return sum(vehicle.total_co2_emission for vehicle in self.vehicles)
+        return float(sum(vehicle.total_co2_emission for vehicle in self.vehicles))
 
     def _calculate_average_co2_per_vehicle(self) -> float:
         """Calculate average CO2 emissions per vehicle in grams"""
@@ -265,28 +246,13 @@ class TrafficModel(mesa.Model):
 
     def _update_historical_metrics(self):
         """Update historical metrics including environmental data"""
-        self.historical_metrics["waiting_time_history"].append(
-            self._calculate_avg_waiting_time()
-        )
-        self.historical_metrics["delay_history"].append(
-            self._calculate_total_delay()
-        )
-        self.historical_metrics["throughput_history"].append(
-            self._calculate_throughput()
-        )
-        self.historical_metrics["speed_history"].append(
-            self._calculate_avg_speed()
-        )
-        self.historical_metrics["vehicle_count_history"].append(
-            len(self.vehicles)
-        )
-
-        self.historical_metrics["stops_history"].append(
-            self._calculate_total_stops()
-        )
-        self.historical_metrics["co2_history"].append(
-            self._calculate_total_co2_emissions()
-        )
+        self.historical_metrics["waiting_time_history"].append(float(self._calculate_avg_waiting_time()))
+        self.historical_metrics["delay_history"].append(float(self._calculate_total_delay()))
+        self.historical_metrics["throughput_history"].append(int(self._calculate_throughput()))
+        self.historical_metrics["speed_history"].append(float(self._calculate_avg_speed()))
+        self.historical_metrics["vehicle_count_history"].append(int(len(self.vehicles)))
+        self.historical_metrics["stops_history"].append(int(self._calculate_total_stops()))
+        self.historical_metrics["co2_history"].append(float(self._calculate_total_co2_emissions()))
 
         max_history = 100
         for key in self.historical_metrics:
@@ -295,29 +261,9 @@ class TrafficModel(mesa.Model):
 
     def get_simulation_state(self) -> Dict:
         """Get current simulation state for API with proper JSON serialization"""
-
-        # Helper function to convert numpy types to Python native types
-        def convert_to_serializable(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.bool_):
-                return bool(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {key: convert_to_serializable(value) for key, value in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_to_serializable(item) for item in obj]
-            elif isinstance(obj, tuple):
-                return tuple(convert_to_serializable(item) for item in obj)
-            else:
-                return obj
-
         state = {
             "simulation_id": f"sim_{id(self)}",
-            "steps": self.steps,
+            "steps": int(self.steps),
             "vehicles": [
                 {
                     "id": int(v.unique_id),
@@ -326,29 +272,16 @@ class TrafficModel(mesa.Model):
                     "color": str(v.color),
                     "speed": float(v.speed),
                     "waiting_time": int(v.waiting_time),
-                    "current_segment": int(v.current_segment),
                     "stopped": bool(v.stopped),
                     "stops": int(v.number_of_stops),
-                    "co2_g": float(round(v.total_co2_emission, 2))
+                    "co2_g": float(round(v.total_co2_emission, 2)),
+                    "direction": str(v.direction_str),
+                    "lane": int(v.lane)
                 }
                 for v in self.vehicles
             ],
-            "traffic_lights": [
-                {
-                    "id": int(tl.unique_id),
-                    "x": float(tl.position[0]),
-                    "y": float(tl.position[1]),
-                    "state": str(tl.state.value),
-                    "queue_length": int(tl.get_queue_length()),
-                    "direction": str(tl.direction),
-                    "green_duration": int(tl.green_duration),
-                    "max_queue": int(tl.max_queue_length),
-                    "total_passed": int(tl.total_vehicles_passed)
-                }
-                for tl in self.traffic_lights
-            ],
+            "traffic_lights": [tl.get_state_dict() for tl in self.traffic_lights],
             "metrics": {
-                # Existing metrics
                 "total_vehicles": int(len(self.vehicles)),
                 "avg_waiting_time": float(self._calculate_avg_waiting_time()),
                 "total_delay": float(self._calculate_total_delay()),
@@ -357,8 +290,6 @@ class TrafficModel(mesa.Model):
                 "completed_vehicles": int(self.completed_vehicles),
                 "spawned_vehicles": int(self.spawned_vehicles),
                 "current_step": int(self.steps),
-
-                # Environmental metrics
                 "total_stops": int(self._calculate_total_stops()),
                 "avg_stops_per_vehicle": float(round(self._calculate_average_stops_per_vehicle(), 2)),
                 "total_co2_g": float(round(self._calculate_total_co2_emissions(), 2)),
@@ -374,10 +305,9 @@ class TrafficModel(mesa.Model):
                 "stops_history": [int(x) for x in self.historical_metrics.get("stops_history", [])],
                 "co2_history": [float(x) for x in self.historical_metrics.get("co2_history", [])],
             },
-            "config": convert_to_serializable(self.config),
+            "config": self.config,
             "timestamp": int(self.steps)
         }
-
         return state
 
     def change_algorithm(self, new_algorithm: str, config: Dict = None):
@@ -399,32 +329,5 @@ class TrafficModel(mesa.Model):
                 light.green_duration = config.get("base_green_time", 25) if config else 25
 
     def get_traffic_light_for_vehicle(self, vehicle: VehicleAgent) -> Optional[TrafficLightAgent]:
-        """Get traffic light controlling this vehicle's movement"""
-        if not vehicle.route or vehicle.current_segment >= len(vehicle.route):
-            return None
-
-        target_pos = vehicle.route[vehicle.current_segment]
-
-        dx = target_pos[0] - vehicle.position[0]
-        dy = target_pos[1] - vehicle.position[1]
-
-        closest_light = None
-        min_distance = float('inf')
-
-        for light in self.traffic_lights:
-            if abs(dx) > abs(dy):
-                if light.direction == "horizontal":
-                    if abs(vehicle.position[1] - light.position[1]) < 3:
-                        distance = abs(vehicle.position[0] - light.position[0])
-                        if distance < min_distance:
-                            min_distance = distance
-                            closest_light = light
-            else:
-                if light.direction == "vertical":
-                    if abs(vehicle.position[0] - light.position[0]) < 3:
-                        distance = abs(vehicle.position[1] - light.position[1])
-                        if distance < min_distance:
-                            min_distance = distance
-                            closest_light = light
-
-        return closest_light
+        """Get traffic light controlling this vehicle"""
+        return vehicle.traffic_light
