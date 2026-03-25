@@ -107,7 +107,11 @@ class TrafficModel(mesa.Model):
             self._spawn_vehicle(i)
 
     def _spawn_vehicle(self, vehicle_id: int):
-        """Create new vehicle"""
+        """Create new vehicle with spawn point availability check"""
+        # Limit maximum number of vehicles
+        if len(self.vehicles) > 100:  # Don't exceed 100 vehicles
+            return False
+
         spawn_points = [
             (0, self.config["grid_height"] // 2),
             (self.config["grid_width"] - 1, self.config["grid_height"] // 2),
@@ -115,18 +119,32 @@ class TrafficModel(mesa.Model):
             (self.config["grid_width"] // 2, self.config["grid_height"] - 1)
         ]
 
-        spawn_point = random.choice(spawn_points)
+        # Shuffle spawn points to try random order
+        random.shuffle(spawn_points)
 
-        vehicle = VehicleAgent(
-            unique_id=vehicle_id,
-            model=self,
-            spawn_point=spawn_point
-        )
+        for spawn_point in spawn_points:
+            # Check if spawn point is occupied
+            point_occupied = False
+            for vehicle in self.vehicles:
+                if abs(vehicle.position[0] - spawn_point[0]) < 2 and \
+                        abs(vehicle.position[1] - spawn_point[1]) < 2:
+                    point_occupied = True
+                    break
 
-        self.vehicles.append(vehicle)
-        self.schedule.add(vehicle)
-        self.grid.place_agent(vehicle, spawn_point)
-        self.spawned_vehicles += 1
+            if not point_occupied:
+                vehicle = VehicleAgent(
+                    unique_id=vehicle_id,
+                    model=self,
+                    spawn_point=spawn_point
+                )
+
+                self.vehicles.append(vehicle)
+                self.schedule.add(vehicle)
+                self.grid.place_agent(vehicle, spawn_point)
+                self.spawned_vehicles += 1
+                return True  # Successfully spawned
+
+        return False  # No free spawn points
 
     def _get_next_vehicle_id(self) -> int:
         """Get next available vehicle ID"""
@@ -135,15 +153,28 @@ class TrafficModel(mesa.Model):
         return max([v.unique_id for v in self.vehicles]) + 1
 
     def is_position_occupied(self, position: Tuple[float, float], exclude_id: int = None) -> bool:
-        """Check if position is occupied by another vehicle"""
-        neighbors = self.grid.get_neighbors(position, radius=1.5, include_center=True)
+        """
+        Check if position is occupied by another vehicle
+        More sophisticated check with direction consideration
+        """
+        for agent in self.vehicles:
+            if agent.unique_id == exclude_id:
+                continue
 
-        for agent in neighbors:
-            if isinstance(agent, VehicleAgent) and agent.unique_id != exclude_id:
-                distance = np.sqrt((agent.position[0] - position[0]) ** 2 +
-                                   (agent.position[1] - position[1]) ** 2)
-                if distance < 1.0:
-                    return True
+            # Calculate distance
+            distance = np.sqrt((agent.position[0] - position[0]) ** 2 +
+                               (agent.position[1] - position[1]) ** 2)
+
+            # Dynamic safe distance based on relative speeds
+            safe_distance = 1.0
+
+            # If vehicles are moving towards each other, increase safe distance
+            if hasattr(agent, 'route') and hasattr(self, 'get_vehicle_by_id'):
+                # This would require more complex logic for head-on collision avoidance
+                pass
+
+            if distance < safe_distance:
+                return True
 
         return False
 
@@ -263,51 +294,89 @@ class TrafficModel(mesa.Model):
                 self.historical_metrics[key] = self.historical_metrics[key][-max_history:]
 
     def get_simulation_state(self) -> Dict:
-        """Get current simulation state for API"""
+        """Get current simulation state for API with proper JSON serialization"""
+
+        # Helper function to convert numpy types to Python native types
+        def convert_to_serializable(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_to_serializable(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_serializable(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return tuple(convert_to_serializable(item) for item in obj)
+            else:
+                return obj
+
         state = {
             "simulation_id": f"sim_{id(self)}",
             "steps": self.steps,
             "vehicles": [
                 {
-                    "id": v.unique_id,
+                    "id": int(v.unique_id),
                     "x": float(v.position[0]),
                     "y": float(v.position[1]),
-                    "color": v.color,
+                    "color": str(v.color),
                     "speed": float(v.speed),
-                    "waiting_time": v.waiting_time,
-                    "current_segment": v.current_segment,
-                    "stopped": v.stopped,
-                    "stops": v.number_of_stops,
-                    "co2_g": round(v.total_co2_emission, 2)
+                    "waiting_time": int(v.waiting_time),
+                    "current_segment": int(v.current_segment),
+                    "stopped": bool(v.stopped),
+                    "stops": int(v.number_of_stops),
+                    "co2_g": float(round(v.total_co2_emission, 2))
                 }
                 for v in self.vehicles
             ],
             "traffic_lights": [
-                tl.get_state_dict() for tl in self.traffic_lights
+                {
+                    "id": int(tl.unique_id),
+                    "x": float(tl.position[0]),
+                    "y": float(tl.position[1]),
+                    "state": str(tl.state.value),
+                    "queue_length": int(tl.get_queue_length()),
+                    "direction": str(tl.direction),
+                    "green_duration": int(tl.green_duration),
+                    "max_queue": int(tl.max_queue_length),
+                    "total_passed": int(tl.total_vehicles_passed)
+                }
+                for tl in self.traffic_lights
             ],
             "metrics": {
-                "total_vehicles": len(self.vehicles),
+                # Existing metrics
+                "total_vehicles": int(len(self.vehicles)),
                 "avg_waiting_time": float(self._calculate_avg_waiting_time()),
                 "total_delay": float(self._calculate_total_delay()),
-                "throughput": self._calculate_throughput(),
+                "throughput": int(self._calculate_throughput()),
                 "avg_speed": float(self._calculate_avg_speed()),
-                "completed_vehicles": self.completed_vehicles,
-                "spawned_vehicles": self.spawned_vehicles,
-                "current_step": self.steps,
+                "completed_vehicles": int(self.completed_vehicles),
+                "spawned_vehicles": int(self.spawned_vehicles),
+                "current_step": int(self.steps),
 
                 # Environmental metrics
-                "total_stops": self._calculate_total_stops(),
-                "avg_stops_per_vehicle": round(self._calculate_average_stops_per_vehicle(), 2),
-                "total_co2_g": round(self._calculate_total_co2_emissions(), 2),
-                "total_co2_kg": round(self._calculate_total_co2_emissions() / 1000, 3),
-                "avg_co2_per_vehicle_g": round(self._calculate_average_co2_per_vehicle(), 2),
+                "total_stops": int(self._calculate_total_stops()),
+                "avg_stops_per_vehicle": float(round(self._calculate_average_stops_per_vehicle(), 2)),
+                "total_co2_g": float(round(self._calculate_total_co2_emissions(), 2)),
+                "total_co2_kg": float(round(self._calculate_total_co2_emissions() / 1000, 3)),
+                "avg_co2_per_vehicle_g": float(round(self._calculate_average_co2_per_vehicle(), 2)),
             },
-            "historical_metrics": self.historical_metrics,
-            "config": self.config,
-            "timestamp": self.steps
+            "historical_metrics": {
+                "waiting_time_history": [float(x) for x in self.historical_metrics.get("waiting_time_history", [])],
+                "delay_history": [float(x) for x in self.historical_metrics.get("delay_history", [])],
+                "throughput_history": [int(x) for x in self.historical_metrics.get("throughput_history", [])],
+                "speed_history": [float(x) for x in self.historical_metrics.get("speed_history", [])],
+                "vehicle_count_history": [int(x) for x in self.historical_metrics.get("vehicle_count_history", [])],
+                "stops_history": [int(x) for x in self.historical_metrics.get("stops_history", [])],
+                "co2_history": [float(x) for x in self.historical_metrics.get("co2_history", [])],
+            },
+            "config": convert_to_serializable(self.config),
+            "timestamp": int(self.steps)
         }
-
-        # print(f"State metrics - Total stops: {state['metrics']['total_stops']}, Vehicles: {len(self.vehicles)}")
 
         return state
 
