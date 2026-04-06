@@ -94,10 +94,66 @@ class VehicleAgent(mesa.Agent):
         self.route = [self.start, self.intersection, self.end]
         self.current_segment = 0
 
+    def _init_path(self):
+        """Initialize start and end points based on lane and direction"""
+        grid_width = self.model.grid.width
+        grid_height = self.model.grid.height
+        center_x = grid_width // 2
+        center_y = grid_height // 2
+        lane_offset = 2.0
+
+        intersection_type = self.model.config.get("road_config", "crossroad")
+
+        if self.direction == LaneDirection.RIGHT:
+            # Движение слева направо
+            self.start_x = 0
+            self.end_x = grid_width - 1
+            self.start_y = center_y - lane_offset
+            self.end_y = self.start_y
+            self.intersection_x = center_x
+            self.intersection_y = self.start_y
+
+        elif self.direction == LaneDirection.LEFT:
+            # Движение справа налево
+            self.start_x = grid_width - 1
+            self.end_x = 0
+            self.start_y = center_y + lane_offset
+            self.end_y = self.start_y
+            self.intersection_x = center_x
+            self.intersection_y = self.start_y
+
+        elif self.direction == LaneDirection.UP:
+            # Для T-образного перекрестка: движение снизу вверх с поворотом
+            if intersection_type == "t_intersection":
+                # Машины снизу поворачивают направо или налево
+                self.start_y = grid_height - 1
+                # Определяем, налево или направо поворот
+                if self.lane == 0:  # Левая полоса -> поворот налево
+                    self.end_x = 0
+                    self.end_y = center_y + lane_offset
+                else:  # Правая полоса -> поворот направо
+                    self.end_x = grid_width - 1
+                    self.end_y = center_y - lane_offset
+                self.start_x = center_x + (lane_offset if self.lane == 1 else -lane_offset)
+                self.intersection_x = self.start_x
+                self.intersection_y = center_y
+            else:
+                # Обычный перекресток
+                self.start_y = grid_height - 1
+                self.end_y = 0
+                self.start_x = center_x - lane_offset
+                self.end_x = self.start_x
+                self.intersection_x = self.start_x
+                self.intersection_y = center_y
+
+        self.position = [self.start_x, self.start_y]
+
     def _find_first_traffic_light(self, traffic_lights):
         """Find the traffic light that is before the intersection on this vehicle's path"""
         closest_light = None
         min_distance = float('inf')
+
+        intersection_type = self.model.config.get("road_config", "crossroad")
 
         for light in traffic_lights:
             if self.direction_str in ["RIGHT", "LEFT"]:
@@ -119,10 +175,14 @@ class VehicleAgent(mesa.Agent):
                             min_distance = dist
                             closest_light = light
 
-            else:
+            else:  # Vertical movement
                 if light.direction != "vertical":
                     continue
                 if abs(light.position[0] - self.intersection_x) > 3:
+                    continue
+
+                # Для T-образного перекрестка, если это верхнее направление - нет светофора
+                if intersection_type == "t_intersection" and self.direction_str == "UP":
                     continue
 
                 if self.direction_str == "DOWN":
@@ -361,12 +421,15 @@ class TrafficLightAgent(mesa.Agent):
     """Agent representing a traffic light"""
 
     def __init__(self, unique_id: int, model, position: Tuple[int, int],
-                 direction: str, algorithm_type: str = "static"):
+                 direction: str, algorithm_type: str = "static",
+                 intersection_type: str = "crossroad", side: str = None):
         super().__init__(unique_id, model)
         self.position = position
         self.direction = direction
         self.state = TrafficLightState.RED
         self.algorithm_type = algorithm_type
+        self.side = side
+        self.intersection_type = intersection_type
         self.timer = 0
         self.green_duration = 100
         self.yellow_duration = 20
@@ -400,30 +463,53 @@ class TrafficLightAgent(mesa.Agent):
         return False
 
     def static_algorithm(self):
-        """Static algorithm with fixed cycle times - opposite lights show same color"""
-        self.cycle_counter += 1
+        """Static algorithm with fixed cycle times"""
+        total_cycle = self.green_duration + self.yellow_duration + self.red_duration
 
-        if self.direction == "horizontal":
-            if self.cycle_counter <= self.green_duration:
-                self.state = TrafficLightState.GREEN
-            elif self.cycle_counter <= self.green_duration + self.yellow_duration:
-                self.state = TrafficLightState.YELLOW
+        if self.intersection_type == "t_intersection":
+            # Для T-образного перекрестка
+            cycle_time = (self.model.schedule.steps + 30) % total_cycle
+
+            if self.side == "bottom":
+                # Нижняя сторона: RED -> GREEN -> YELLOW
+                offset = self.green_duration + self.yellow_duration
+                adjusted_time = (cycle_time + offset) % total_cycle
+                if adjusted_time < self.green_duration:
+                    self.state = TrafficLightState.GREEN
+                elif adjusted_time < self.green_duration + self.yellow_duration:
+                    self.state = TrafficLightState.YELLOW
+                else:
+                    self.state = TrafficLightState.RED
             else:
-                self.state = TrafficLightState.RED
+                # Левая и правая стороны: GREEN -> YELLOW -> RED
+                if cycle_time < self.green_duration:
+                    self.state = TrafficLightState.GREEN
+                elif cycle_time < self.green_duration + self.yellow_duration:
+                    self.state = TrafficLightState.YELLOW
+                else:
+                    self.state = TrafficLightState.RED
+        else:
+            # Стандартный перекресток (без изменений)
+            cycle_time = (self.model.schedule.steps + 30) % total_cycle
 
-            if self.cycle_counter >= self.green_duration + self.yellow_duration + self.red_duration:
-                self.cycle_counter = 0
-
-        else:  # vertical
-            if self.cycle_counter <= self.red_duration:
-                self.state = TrafficLightState.RED
-            elif self.cycle_counter <= self.red_duration + self.green_duration:
-                self.state = TrafficLightState.GREEN
+            if self.direction == "horizontal":
+                if cycle_time < self.green_duration:
+                    self.state = TrafficLightState.GREEN
+                elif cycle_time < self.green_duration + self.yellow_duration:
+                    self.state = TrafficLightState.YELLOW
+                else:
+                    self.state = TrafficLightState.RED
             else:
-                self.state = TrafficLightState.YELLOW
+                offset = self.green_duration + self.yellow_duration
+                vertical_cycle_time = (cycle_time + offset) % total_cycle
+                if vertical_cycle_time < self.green_duration:
+                    self.state = TrafficLightState.GREEN
+                elif vertical_cycle_time < self.green_duration + self.yellow_duration:
+                    self.state = TrafficLightState.YELLOW
+                else:
+                    self.state = TrafficLightState.RED
 
-            if self.cycle_counter >= self.red_duration + self.green_duration + self.yellow_duration:
-                self.cycle_counter = 0
+        self.timer += 1
 
     def adaptive_algorithm(self):
         """Adaptive algorithm based on queue length"""
@@ -476,6 +562,8 @@ class TrafficLightAgent(mesa.Agent):
             "state": str(self.state.value),
             "queue_length": self.get_queue_length(),
             "direction": str(self.direction),
+            "side": str(self.side) if self.side else None,
+            "intersection_type": str(self.intersection_type),
             "green_duration": int(self.green_duration),
             "max_queue": int(self.max_queue_length),
             "total_passed": int(self.total_vehicles_passed)

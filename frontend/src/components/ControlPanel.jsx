@@ -15,10 +15,16 @@ const ControlPanel = ({
     spawn_rate: 0.1,
     simulation_speed: 1,
     algorithm: 'static',
-    grid_width: 50,
-    grid_height: 50,
+    grid_width: 150,
+    grid_height: 150,
     road_config: 'crossroad',
-    algorithm_config: {}
+    algorithm_config: {},
+    network_type: 'single',
+    network_config: {
+      rows: 3,
+      cols: 3,
+      spacing: 20
+    }
   });
 
   const [algorithms, setAlgorithms] = useState([]);
@@ -42,7 +48,6 @@ const ControlPanel = ({
     const newConfig = { ...config, [key]: value };
     setConfig(newConfig);
 
-    // Отправляем обновление на сервер
     if (onConfigUpdate) {
       setUpdateStatus('updating...');
       try {
@@ -56,6 +61,49 @@ const ControlPanel = ({
     }
   };
 
+  const handleNetworkConfigChange = async (key, value) => {
+      const newNetworkConfig = { ...config.network_config, [key]: value };
+      setConfig(prev => ({ ...prev, network_config: newNetworkConfig }));
+
+      // Всегда отправляем обновление на сервер при изменении параметров сетки
+      if (onConfigUpdate) {
+        setUpdateStatus('updating network...');
+        try {
+          await onConfigUpdate({
+            ...config,
+            network_config: newNetworkConfig,
+            network_type: 'grid'
+          });
+          setUpdateStatus('network updated ✓');
+          setTimeout(() => setUpdateStatus(''), 2000);
+        } catch (error) {
+          setUpdateStatus('error!');
+          console.error('Error updating network config:', error);
+        }
+      }
+    };
+
+  const handleNetworkToggle = async () => {
+    const newNetworkType = config.network_type === 'single' ? 'grid' : 'single';
+
+    if (onConfigUpdate) {
+      setUpdateStatus(newNetworkType === 'grid' ? 'activating grid...' : 'deactivating grid...');
+      try {
+        await onConfigUpdate({
+          ...config,
+          network_type: newNetworkType,
+          network_config: config.network_config
+        });
+        setConfig(prev => ({ ...prev, network_type: newNetworkType }));
+        setUpdateStatus(newNetworkType === 'grid' ? 'grid activated ✓' : 'grid deactivated ✓');
+        setTimeout(() => setUpdateStatus(''), 2000);
+      } catch (error) {
+        setUpdateStatus('error!');
+        console.error('Error toggling network:', error);
+      }
+    }
+  };
+
   const handleAlgorithmChange = async (algorithmId) => {
     if (!simulationId) return;
 
@@ -63,10 +111,7 @@ const ControlPanel = ({
     setUpdateStatus('changing algorithm...');
 
     try {
-      // Находим выбранный алгоритм
       const selectedAlgo = algorithms.find(a => a.id === algorithmId);
-
-      // Создаем конфиг для алгоритма
       const algoConfig = {};
       if (selectedAlgo && selectedAlgo.parameters) {
         selectedAlgo.parameters.forEach(param => {
@@ -74,10 +119,7 @@ const ControlPanel = ({
         });
       }
 
-      // Отправляем запрос на смену алгоритма
       await simulationAPI.changeAlgorithm(simulationId, algorithmId, algoConfig);
-
-      // Обновляем локальное состояние
       setConfig(prev => ({ ...prev, algorithm: algorithmId, algorithm_config: algoConfig }));
 
       if (onAlgorithmChange) {
@@ -209,6 +251,94 @@ const ControlPanel = ({
         </div>
       </div>
 
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '600' }}>
+          Road Configuration
+        </label>
+        <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
+          {['crossroad', 't_intersection'].map(type => (
+            <button
+              key={type}
+              onClick={() => handleConfigChange('road_config', type)}
+              disabled={config.network_type !== 'single'}
+              style={{
+                backgroundColor: config.road_config === type && config.network_type === 'single' ? '#3498db' : '#ecf0f1',
+                color: config.road_config === type && config.network_type === 'single' ? 'white' : '#2c3e50',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: '6px',
+                cursor: config.network_type === 'single' ? 'pointer' : 'not-allowed',
+                fontSize: '13px',
+                flex: 1,
+                textTransform: 'capitalize',
+                opacity: config.network_type !== 'single' ? 0.5 : 1,
+              }}
+              title={config.network_type !== 'single' ? 'Disabled in network mode' : ''}
+            >
+              {type === 'crossroad' ? '4-Way Intersection' : 'T-Intersection'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '600' }}>
+          🕸️ Network Mode
+        </label>
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <button
+            onClick={handleNetworkToggle}
+            style={{
+              backgroundColor: config.network_type === 'grid' ? '#3498db' : '#ecf0f1',
+              color: config.network_type === 'grid' ? 'white' : '#2c3e50',
+              border: 'none',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              flex: 1,
+              fontSize: '13px',
+              fontWeight: 'bold',
+            }}
+          >
+            {config.network_type === 'grid' ? '🌐 Grid Network ON' : '📍 Single Intersection'}
+          </button>
+        </div>
+
+        {config.network_type === 'grid' && (
+          <div style={{ marginTop: '10px', padding: '10px', backgroundColor: '#f8f9fa', borderRadius: '6px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+              <SliderControl
+                label="Rows"
+                value={config.network_config.rows}
+                min={2}
+                max={5}
+                step={1}
+                onChange={(v) => handleNetworkConfigChange('rows', v)}
+              />
+              <SliderControl
+                label="Cols"
+                value={config.network_config.cols}
+                min={2}
+                max={5}
+                step={1}
+                onChange={(v) => handleNetworkConfigChange('cols', v)}
+              />
+              <SliderControl
+                label="Spacing"
+                value={config.network_config.spacing}
+                min={15}
+                max={35}
+                step={2}
+                onChange={(v) => handleNetworkConfigChange('spacing', v)}
+              />
+            </div>
+            <div style={{ fontSize: '12px', color: '#7f8c8d', textAlign: 'center' }}>
+              Grid will create {config.network_config.rows} × {config.network_config.cols} intersections
+            </div>
+          </div>
+        )}
+      </div>
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
         <SliderControl
           label="Number of Vehicles"
@@ -242,8 +372,8 @@ const ControlPanel = ({
         <SliderControl
           label="Grid Width"
           value={config.grid_width}
-          min={20}
-          max={100}
+          min={30}
+          max={150}
           step={10}
           onChange={(value) => handleConfigChange('grid_width', value)}
         />
@@ -251,38 +381,11 @@ const ControlPanel = ({
         <SliderControl
           label="Grid Height"
           value={config.grid_height}
-          min={20}
-          max={100}
+          min={30}
+          max={150}
           step={10}
           onChange={(value) => handleConfigChange('grid_height', value)}
         />
-      </div>
-
-      <div style={{ marginTop: '20px' }}>
-        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '600' }}>
-          Road Configuration
-        </label>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          {['crossroad', 't_intersection', 'grid'].map(type => (
-            <button
-              key={type}
-              onClick={() => handleConfigChange('road_config', type)}
-              style={{
-                backgroundColor: config.road_config === type ? '#3498db' : '#ecf0f1',
-                color: config.road_config === type ? 'white' : '#2c3e50',
-                border: 'none',
-                padding: '8px 16px',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '13px',
-                flex: 1,
-                textTransform: 'capitalize',
-              }}
-            >
-              {type.replace('_', ' ')}
-            </button>
-          ))}
-        </div>
       </div>
     </div>
   );

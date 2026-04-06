@@ -43,14 +43,13 @@ function App() {
     }
   }, [wsError]);
 
-  // Создание новой симуляции при загрузке
   useEffect(() => {
     const createNewSimulation = async () => {
       setIsLoading(true);
       try {
         const response = await simulationAPI.createSimulation({
-          grid_width: 50,
-          grid_height: 50,
+          grid_width: 150,
+          grid_height: 150,
           num_vehicles: 20,
           algorithm: 'static',
           spawn_rate: 0.1,
@@ -75,13 +74,12 @@ function App() {
 
     createNewSimulation();
 
-    // Очистка при размонтировании
     return () => {
       if (simulationId) {
         disconnect();
       }
     };
-  }, []); // Пустой массив зависимостей - выполняется только один раз
+  }, []);
 
   const handleConfigUpdate = async (newConfig) => {
     if (!simulationId) return;
@@ -132,13 +130,11 @@ function App() {
 
   try {
     if (!isRunning) {
-      // Запускаем симуляцию
       console.log('Starting simulation...');
       await simulationAPI.resumeSimulation(simulationId, 1.0);
       setIsRunning(true);
       setError(null);
     } else {
-      // Останавливаем симуляцию
       console.log('Pausing simulation...');
       await simulationAPI.pauseSimulation(simulationId);
       setIsRunning(false);
@@ -147,18 +143,14 @@ function App() {
   } catch (error) {
     console.error('Error toggling simulation:', error);
 
-    // Более подробное сообщение об ошибке
     let errorMessage = 'Failed to toggle simulation state';
 
     if (error.response) {
-      // Сервер вернул ошибку
       errorMessage = `Server error: ${error.response.status} - ${error.response.data?.error || error.response.statusText}`;
       console.error('Server response:', error.response.data);
     } else if (error.request) {
-      // Запрос был отправлен, но нет ответа
       errorMessage = 'No response from server. Make sure backend is running on http://localhost:8000';
     } else {
-      // Ошибка при настройке запроса
       errorMessage = `Request error: ${error.message}`;
     }
 
@@ -170,13 +162,12 @@ function App() {
     setIsLoading(true);
     setIsRunning(false);
 
-    // Отключаем WebSocket перед перезапуском
     disconnect();
 
     try {
       const response = await simulationAPI.createSimulation({
-        grid_width: 50,
-        grid_height: 50,
+        grid_width: 150,
+        grid_height: 150,
         num_vehicles: 20,
         algorithm: 'static',
         spawn_rate: 0.1,

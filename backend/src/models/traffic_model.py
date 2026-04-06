@@ -12,8 +12,8 @@ class TrafficModel(mesa.Model):
         super().__init__()
 
         self.default_config = {
-            "grid_width": 50,
-            "grid_height": 50,
+            "grid_width": 150,
+            "grid_height": 150,
             "num_vehicles": 20,
             "algorithm": "static",
             "algorithm_config": {},
@@ -46,6 +46,7 @@ class TrafficModel(mesa.Model):
             "co2_history": []
         }
 
+        # Генерируем дорожную сеть в зависимости от конфигурации
         self._generate_road_network()
 
         self.datacollector = mesa.DataCollector(
@@ -74,29 +75,48 @@ class TrafficModel(mesa.Model):
             }
         )
 
+        self.network = None
+        self.network_type = self.config.get("network_type", "single")
+
+        if self.network_type != "single":
+            self._init_road_network()
+
         self.steps = 0
 
     def _generate_road_network(self):
-        """Generate road network with traffic lights at intersection"""
+        """Generate road network based on configuration"""
+        road_config = self.config.get("road_config", "crossroad")
+
+        if road_config == "crossroad":
+            self._generate_crossroad()
+        elif road_config == "t_intersection":
+            self._generate_t_intersection()
+        else:
+            self._generate_crossroad()
+
+    def _generate_crossroad(self):
+        """Generate standard 4-way intersection"""
         center_x = self.config["grid_width"] // 2
         center_y = self.config["grid_height"] // 2
 
         light_positions = [
-            (center_x - 5, center_y, "horizontal"),
-            (center_x + 5, center_y, "horizontal"),
-            (center_x, center_y - 5, "vertical"),
-            (center_x, center_y + 5, "vertical"),
+            (center_x - 8, center_y, "horizontal", "left"),
+            (center_x + 8, center_y, "horizontal", "right"),
+            (center_x, center_y - 8, "vertical", "top"),
+            (center_x, center_y + 8, "vertical", "bottom"),
         ]
 
         algorithm_type = self.config["algorithm"]
 
-        for i, (x, y, direction) in enumerate(light_positions):
+        for i, (x, y, direction, side) in enumerate(light_positions):
             light = TrafficLightAgent(
                 unique_id=1000 + i,
                 model=self,
                 position=(x, y),
                 direction=direction,
-                algorithm_type=algorithm_type
+                algorithm_type=algorithm_type,
+                intersection_type="crossroad",
+                side=side
             )
             self.traffic_lights.append(light)
             self.schedule.add(light)
@@ -105,7 +125,234 @@ class TrafficModel(mesa.Model):
         for i in range(self.config["num_vehicles"]):
             self._spawn_vehicle(i)
 
+    def _generate_t_intersection(self):
+        """Generate T-shaped intersection (3-way)"""
+        center_x = self.config["grid_width"] // 2
+        center_y = self.config["grid_height"] // 2
+
+        light_positions = [
+            (center_x - 8, center_y, "horizontal", "left"),
+            (center_x + 8, center_y, "horizontal", "right"),
+            (center_x, center_y + 8, "vertical", "bottom"),
+        ]
+
+        algorithm_type = self.config["algorithm"]
+
+        for i, (x, y, direction, side) in enumerate(light_positions):
+            light = TrafficLightAgent(
+                unique_id=1000 + i,
+                model=self,
+                position=(x, y),
+                direction=direction,
+                algorithm_type=algorithm_type,
+                intersection_type="t_intersection",
+                side=side
+            )
+            self.traffic_lights.append(light)
+            self.schedule.add(light)
+            self.grid.place_agent(light, (x, y))
+
+        for i in range(self.config["num_vehicles"]):
+            self._spawn_vehicle(i)
+
+    def _init_road_network(self):
+        """Initialize road network from config"""
+        from backend.src.models.network.network_config import NetworkConfig
+        from backend.src.models.network.road_network import RoadNetwork
+
+        # Get network config from model config
+        network_config_params = self.config.get("network_config", {"rows": 3, "cols": 3, "spacing": 20})
+        rows = network_config_params.get("rows", 3)
+        cols = network_config_params.get("cols", 3)
+        spacing = network_config_params.get("spacing", 20)
+
+        print(f"Creating grid network: {rows}x{cols}, spacing={spacing}")
+
+        # Pass grid dimensions to network config
+        self.network_config = NetworkConfig.create_grid(
+            rows=rows,
+            cols=cols,
+            spacing=spacing,
+            grid_width=self.config["grid_width"],
+            grid_height=self.config["grid_height"]
+        )
+
+        self.network = RoadNetwork(self.network_config, self)
+        self.network.create_traffic_lights(self, self.config["algorithm"])
+
+        # Add all traffic lights to schedule
+        for light in self.network.get_traffic_lights():
+            self.traffic_lights.append(light)
+            self.schedule.add(light)
+            self.grid.place_agent(light, light.position)
+
+        print(f"Created {len(self.traffic_lights)} traffic lights")
+
+    def _spawn_vehicle_network(self, vehicle_id: int) -> bool:
+        """Spawn vehicle on network"""
+        if self.network:
+            return self.network.spawn_vehicle_on_network(vehicle_id)
+        return False
+
     def _spawn_vehicle(self, vehicle_id: int) -> bool:
+        """Create new vehicle based on configuration"""
+        if self.network:
+            return self._spawn_vehicle_network(vehicle_id)
+        elif self.config.get("road_config") == "t_intersection":
+            return self._spawn_vehicle_t_intersection(vehicle_id)
+        else:
+            return self._spawn_vehicle_crossroad(vehicle_id)
+
+    def update_config(self, config_update: Dict):
+        """Update simulation configuration"""
+        allowed_params = [
+            "num_vehicles", "spawn_rate", "simulation_speed",
+            "road_config", "algorithm_config", "algorithm"
+        ]
+
+        # Проверяем, меняется ли road_config
+        old_road_config = self.config.get("road_config")
+        new_road_config = config_update.get("road_config")
+
+        # Если меняется тип перекрестка, нужно пересоздать сеть
+        if new_road_config and new_road_config != old_road_config:
+            self._rebuild_road_network(new_road_config)
+
+        # Обновляем остальные параметры
+        for param in allowed_params:
+            if param in config_update and param != "road_config":
+                self.config[param] = config_update[param]
+
+                # Специальная обработка для num_vehicles
+                if param == "num_vehicles":
+                    self._adjust_vehicle_count(config_update["num_vehicles"])
+
+        # Если меняется алгоритм
+        if "algorithm" in config_update:
+            algorithm = config_update["algorithm"]
+            algorithm_config = config_update.get("algorithm_config", {})
+            self.config["algorithm"] = algorithm
+            self.config["algorithm_config"] = algorithm_config
+
+            for light in self.traffic_lights:
+                light.algorithm_type = algorithm
+                light.timer = 0
+
+    def _rebuild_road_network(self, new_network_type: str):
+        """Rebuild road network when configuration changes"""
+        # Delete all vehicles
+        for vehicle in self.vehicles.copy():
+            self.vehicles.remove(vehicle)
+            self.schedule.remove(vehicle)
+            self.grid.remove_agent(vehicle)
+
+        # Delete all traffic lights
+        for light in self.traffic_lights.copy():
+            self.traffic_lights.remove(light)
+            self.schedule.remove(light)
+            self.grid.remove_agent(light)
+
+        # Clear network if exists
+        self.network = None
+
+        # Update config
+        self.config["network_type"] = new_network_type
+
+        # Reset grid spaces (clear all agents)
+        self.grid = mesa.space.ContinuousSpace(
+            self.config["grid_width"],
+            self.config["grid_height"],
+            torus=False
+        )
+
+        # Reinitialize schedule
+        self.schedule = mesa.time.RandomActivation(self)
+
+        # Reinitialize network or road configuration
+        if new_network_type == "grid":
+            self._init_road_network()
+        else:
+            self._generate_road_network()
+
+        # Reset counters
+        self.completed_vehicles = 0
+        self.spawned_vehicles = 0
+        self.steps = 0
+
+        # Spawn initial vehicles
+        for i in range(min(self.config["num_vehicles"], 50)):
+            self._spawn_vehicle(i)
+
+    def _adjust_vehicle_count(self, target_count: int):
+        """Adjust number of vehicles to target count"""
+        current_count = len(self.vehicles)
+
+        if target_count > current_count:
+            # Добавляем новые машины
+            for i in range(target_count - current_count):
+                new_id = self._get_next_vehicle_id()
+                self._spawn_vehicle(new_id)
+        elif target_count < current_count:
+            # Удаляем лишние машины (начиная с последних)
+            for _ in range(current_count - target_count):
+                if self.vehicles:
+                    vehicle = self.vehicles[-1]
+                    self.vehicles.remove(vehicle)
+                    self.schedule.remove(vehicle)
+                    self.grid.remove_agent(vehicle)
+
+    def _spawn_vehicle(self, vehicle_id: int) -> bool:
+        """Create new vehicle based on current road configuration"""
+        road_config = self.config.get("road_config", "crossroad")
+
+        if road_config == "t_intersection":
+            return self._spawn_vehicle_t_intersection(vehicle_id)
+        else:
+            return self._spawn_vehicle_crossroad(vehicle_id)
+
+    def _spawn_vehicle_t_intersection(self, vehicle_id: int) -> bool:
+        """Create new vehicle for T-shaped intersection (3-way)"""
+        if len(self.vehicles) > 100:
+            return False
+
+        grid_width = self.config["grid_width"]
+        grid_height = self.config["grid_height"]
+        center_x = grid_width // 2
+        center_y = grid_height // 2
+        lane_offset = 2.0
+
+        spawn_configs = [
+            (0, center_y - lane_offset, LaneDirection.RIGHT, 0),
+            (grid_width - 1, center_y + lane_offset, LaneDirection.LEFT, 1),
+            (center_x - lane_offset, grid_height - 1, LaneDirection.UP, 0)
+        ]
+
+        random.shuffle(spawn_configs)
+
+        for x, y, direction, lane in spawn_configs:
+            point_occupied = False
+            for vehicle in self.vehicles:
+                if abs(vehicle.position[0] - x) < 2 and abs(vehicle.position[1] - y) < 2:
+                    point_occupied = True
+                    break
+
+            if not point_occupied:
+                vehicle = VehicleAgent(
+                    unique_id=vehicle_id,
+                    model=self,
+                    spawn_point=(x, y),
+                    lane=lane,
+                    direction=direction
+                )
+                self.vehicles.append(vehicle)
+                self.schedule.add(vehicle)
+                self.grid.place_agent(vehicle, (x, y))
+                self.spawned_vehicles += 1
+                return True
+
+        return False
+
+    def _spawn_vehicle_crossroad(self, vehicle_id: int) -> bool:
         """Create new vehicle with lane-based spawning"""
         if len(self.vehicles) > 100:
             return False
@@ -260,7 +507,7 @@ class TrafficModel(mesa.Model):
                 self.historical_metrics[key] = self.historical_metrics[key][-max_history:]
 
     def get_simulation_state(self) -> Dict:
-        """Get current simulation state for API with proper JSON serialization"""
+        """Get current simulation state for API"""
         state = {
             "simulation_id": f"sim_{id(self)}",
             "steps": int(self.steps),
@@ -275,8 +522,8 @@ class TrafficModel(mesa.Model):
                     "stopped": bool(v.stopped),
                     "stops": int(v.number_of_stops),
                     "co2_g": float(round(v.total_co2_emission, 2)),
-                    "direction": str(v.direction_str),
-                    "lane": int(v.lane)
+                    "direction": str(v.direction_str) if hasattr(v, 'direction_str') else None,
+                    "lane": int(v.lane) if hasattr(v, 'lane') else 0
                 }
                 for v in self.vehicles
             ],
@@ -308,6 +555,11 @@ class TrafficModel(mesa.Model):
             "config": self.config,
             "timestamp": int(self.steps)
         }
+
+        # Add network state if in grid mode
+        if self.network:
+            state["network"] = self.network.get_state_dict()
+
         return state
 
     def change_algorithm(self, new_algorithm: str, config: Dict = None):

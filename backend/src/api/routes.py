@@ -33,6 +33,8 @@ class SimulationConfig(BaseModel):
     spawn_rate: float = 0.1
     simulation_speed: float = 1.0
     road_config: str = "crossroad"
+    network_type: str = "single"
+    network_config: Dict[str, Any] = {}
 
 
 @app.post("/api/simulation/create")
@@ -139,34 +141,66 @@ async def update_config(sim_id: str, config_update: Dict):
 
     allowed_params = [
         "num_vehicles", "spawn_rate", "simulation_speed",
-        "road_config", "algorithm_config"
+        "road_config", "algorithm_config", "network_type", "network_config",
+        "grid_width", "grid_height"
     ]
 
-    # Обновляем параметры
+    # Check if network config changed
+    old_network_type = model.config.get("network_type", "single")
+    new_network_type = config_update.get("network_type", old_network_type)
+
+    # Check if network parameters changed
+    old_network_config = model.config.get("network_config", {"rows": 3, "cols": 3, "spacing": 20})
+    new_network_config = config_update.get("network_config", old_network_config)
+
+    # Update config values
     for param in allowed_params:
         if param in config_update:
             model.config[param] = config_update[param]
 
-            # Специальная обработка для num_vehicles
-            if param == "num_vehicles":
-                current_vehicles = len(model.vehicles)
-                target_vehicles = config_update["num_vehicles"]
+    # Rebuild network if needed (type changed OR network params changed)
+    network_changed = (new_network_type != old_network_type) or (new_network_config != old_network_config)
 
-                if target_vehicles > current_vehicles:
-                    # Добавляем новые машины
-                    vehicles_to_add = target_vehicles - current_vehicles
-                    for i in range(vehicles_to_add):
-                        new_id = max([v.unique_id for v in model.vehicles], default=0) + 1
-                        model._spawn_vehicle(new_id)
-                elif target_vehicles < current_vehicles:
-                    # Удаляем лишние машины
-                    vehicles_to_remove = current_vehicles - target_vehicles
-                    for _ in range(vehicles_to_remove):
-                        if model.vehicles:
-                            vehicle = model.vehicles[-1]
-                            model.vehicles.remove(vehicle)
-                            model.schedule.remove(vehicle)
-                            model.grid.remove_agent(vehicle)
+    if network_changed and new_network_type == "grid":
+        # Store new network config
+        model.config["network_config"] = new_network_config
+        model.config["network_type"] = "grid"
+        # Rebuild network with new parameters
+        model._rebuild_road_network("grid")
+    elif new_network_type == "single" and old_network_type == "grid":
+        # Switch from grid to single intersection
+        model._rebuild_road_network("single")
+    elif "road_config" in config_update and new_network_type == "single":
+        # Change intersection type for single mode
+        model._rebuild_road_network("single")
+
+    # Handle num_vehicles
+    if "num_vehicles" in config_update:
+        current_vehicles = len(model.vehicles)
+        target_vehicles = config_update["num_vehicles"]
+
+        if target_vehicles > current_vehicles:
+            for i in range(target_vehicles - current_vehicles):
+                new_id = max([v.unique_id for v in model.vehicles], default=0) + 1
+                model._spawn_vehicle(new_id)
+        elif target_vehicles < current_vehicles:
+            for _ in range(current_vehicles - target_vehicles):
+                if model.vehicles:
+                    vehicle = model.vehicles[-1]
+                    model.vehicles.remove(vehicle)
+                    model.schedule.remove(vehicle)
+                    model.grid.remove_agent(vehicle)
+
+    # Handle algorithm change
+    if "algorithm" in config_update:
+        algorithm = config_update["algorithm"]
+        algorithm_config = config_update.get("algorithm_config", {})
+        model.config["algorithm"] = algorithm
+        model.config["algorithm_config"] = algorithm_config
+
+        for light in model.traffic_lights:
+            light.algorithm_type = algorithm
+            light.timer = 0
 
     return {
         "message": "Configuration updated successfully",
@@ -175,11 +209,12 @@ async def update_config(sim_id: str, config_update: Dict):
             "spawn_rate": model.config.get("spawn_rate"),
             "simulation_speed": model.config.get("simulation_speed"),
             "algorithm": model.config.get("algorithm"),
-            "road_config": model.config.get("road_config")
+            "road_config": model.config.get("road_config"),
+            "network_type": model.config.get("network_type", "single"),
+            "network_config": model.config.get("network_config", {})
         },
         "current_step": model.steps
     }
-
 
 @app.get("/api/simulation/{sim_id}/agent_metrics")
 async def get_agent_metrics(sim_id: str, agent_type: str = "vehicle", limit: int = 50):
@@ -200,22 +235,17 @@ async def get_agent_metrics(sim_id: str, agent_type: str = "vehicle", limit: int
 
     agent_metrics = []
 
-    # Безопасный способ получения данных агентов
     try:
         if isinstance(df.index, pd.MultiIndex):
-            # Получаем уникальные ID агентов
             agent_ids = df.index.get_level_values(0).unique()
 
             for agent_id in agent_ids:
                 try:
-                    # Получаем данные для конкретного агента
                     agent_data = df.xs(agent_id, level=0)
 
                     if not agent_data.empty:
-                        # Берем последнюю запись
                         latest = agent_data.iloc[-1].to_dict()
 
-                        # Фильтруем по типу если нужно
                         if agent_type != "all":
                             agent_type_value = latest.get("Type", "")
                             if (agent_type == "vehicle" and "Vehicle" not in agent_type_value) or \
@@ -231,43 +261,6 @@ async def get_agent_metrics(sim_id: str, agent_type: str = "vehicle", limit: int
     except Exception as e:
         print(f"Error processing agent metrics: {e}")
         return {"agent_metrics": [], "total_agents": 0}
-
-    # Сортируем и ограничиваем количество
-    agent_metrics = agent_metrics[:limit]
-
-    return {
-        "agent_metrics": agent_metrics,
-        "total_agents": len(agent_metrics)
-    }
-
-
-@app.get("/api/simulation/{sim_id}/agent_metrics")
-async def get_agent_metrics(sim_id: str, agent_type: str = "vehicle", limit: int = 50):
-    """Get individual agent metrics"""
-    if sim_id not in active_simulations:
-        return {"error": "Simulation not found"}
-
-    model = active_simulations[sim_id]
-    df = model.datacollector.get_agent_vars_dataframe()
-
-    if df.empty:
-        return {"agent_metrics": []}
-
-    if agent_type == "vehicle":
-        filtered_df = df[df["Type"] == "VehicleAgent"]
-    elif agent_type == "traffic_light":
-        filtered_df = df[df["Type"] == "TrafficLightAgent"]
-    else:
-        filtered_df = df
-
-    agent_metrics = []
-    if not filtered_df.empty:
-        for agent_id in filtered_df.index.levels[0]:
-            agent_data = filtered_df.xs(agent_id)
-            if not agent_data.empty:
-                latest = agent_data.iloc[-1].to_dict()
-                latest["agent_id"] = agent_id
-                agent_metrics.append(latest)
 
     return {
         "agent_metrics": agent_metrics[:limit],
@@ -473,7 +466,8 @@ async def list_simulations():
             "config": {
                 "algorithm": model.config.get("algorithm", "static"),
                 "num_vehicles": len(model.vehicles),
-                "road_config": model.config.get("road_config", "crossroad")
+                "road_config": model.config.get("road_config", "crossroad"),
+                "network_type": model.config.get("network_type", "single")
             },
             "metrics": {
                 "total_vehicles": len(model.vehicles),
@@ -486,4 +480,89 @@ async def list_simulations():
     return {
         "total_simulations": len(active_simulations),
         "simulations": simulations_list
+    }
+
+
+@app.get("/api/simulation/{sim_id}/debug")
+async def get_debug_info(sim_id: str):
+    """Get debug information about simulation"""
+    if sim_id not in active_simulations:
+        return {"error": "Simulation not found"}
+
+    model = active_simulations[sim_id]
+
+    debug_info = {
+        "simulation_id": sim_id,
+        "config": model.config,
+        "network_type": model.config.get("network_type", "single"),
+        "stats": {
+            "total_vehicles": len(model.vehicles),
+            "total_traffic_lights": len(model.traffic_lights),
+            "completed_vehicles": model.completed_vehicles,
+            "spawned_vehicles": model.spawned_vehicles,
+            "current_step": model.steps,
+            "grid_size": {
+                "width": model.config.get("grid_width"),
+                "height": model.config.get("grid_height")
+            }
+        },
+        "traffic_lights": [
+            {
+                "id": light.unique_id,
+                "position": light.position,
+                "direction": light.direction,
+                "side": getattr(light, 'side', None),
+                "intersection_type": getattr(light, 'intersection_type', 'crossroad'),
+                "state": light.state.value,
+                "queue_length": light.get_queue_length()
+            }
+            for light in model.traffic_lights
+        ]
+    }
+
+    # Добавляем информацию о сети если есть
+    if hasattr(model, 'network') and model.network:
+        debug_info["network"] = {
+            "intersections_count": len(model.network.intersections),
+            "roads_count": len(model.network.roads),
+            "intersections": [
+                {
+                    "id": node.id,
+                    "x": node.x,
+                    "y": node.y,
+                    "traffic_lights_count": len(node.traffic_lights)
+                }
+                for node in model.network.intersections.values()
+            ]
+        }
+
+    return debug_info
+
+
+@app.get("/api/simulation/{sim_id}/traffic_lights")
+async def get_traffic_lights_info(sim_id: str):
+    """Get detailed traffic lights information"""
+    if sim_id not in active_simulations:
+        return {"error": "Simulation not found"}
+
+    model = active_simulations[sim_id]
+
+    return {
+        "total": len(model.traffic_lights),
+        "traffic_lights": [
+            {
+                "id": light.unique_id,
+                "x": light.position[0],
+                "y": light.position[1],
+                "direction": light.direction,
+                "side": getattr(light, 'side', None),
+                "intersection_type": getattr(light, 'intersection_type', 'crossroad'),
+                "state": light.state.value,
+                "queue_length": light.get_queue_length(),
+                "green_duration": light.green_duration,
+                "yellow_duration": light.yellow_duration,
+                "red_duration": light.red_duration
+            }
+            for light in model.traffic_lights
+        ]
     }

@@ -25,7 +25,9 @@ export const simulationAPI = {
       spawn_rate: config.spawn_rate,
       simulation_speed: config.simulation_speed,
       road_config: config.road_config,
-      algorithm_config: config.algorithm_config || {}
+      algorithm_config: config.algorithm_config || {},
+      network_type: config.network_type || 'single',
+      network_config: config.network_config || { rows: 3, cols: 3, spacing: 20 }
     };
     return api.post(`/api/simulation/${simId}/config`, updateData);
   },

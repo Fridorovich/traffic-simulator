@@ -12,10 +12,16 @@ const SimulationCanvas = ({
   const {
     vehicles = [],
     traffic_lights: trafficLights = [],
+    network = null,
     config = {}
   } = simulationState;
 
-  const { grid_width: gridWidth = 50, grid_height: gridHeight = 50 } = config;
+  const {
+    grid_width: gridWidth = 150,
+    grid_height: gridHeight = 150,
+    road_config: roadConfig = 'crossroad',
+    network_type: networkType = 'single'
+  } = config;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -24,57 +30,191 @@ const SimulationCanvas = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Устанавливаем фиксированный размер canvas
+    canvas.width = 800;
+    canvas.height = 600;
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Фон
     ctx.fillStyle = '#2c3e50';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    ctx.strokeStyle = '#34495e';
-    ctx.lineWidth = 2;
+    // Функции масштабирования - простое линейное преобразование
+    const scaleX = (x) => (x / gridWidth) * canvas.width;
+    const scaleY = (y) => (y / gridHeight) * canvas.height;
 
-    ctx.beginPath();
-    ctx.moveTo(0, canvas.height / 2);
-    ctx.lineTo(canvas.width, canvas.height / 2);
-    ctx.stroke();
+    const roadWidth = 20;
+    const crossSize = 25;
 
-    ctx.beginPath();
-    ctx.moveTo(canvas.width / 2, 0);
-    ctx.lineTo(canvas.width / 2, canvas.height);
-    ctx.stroke();
+    ctx.fillStyle = '#34495e';
 
-    const crossSize = 20;
-    ctx.fillStyle = '#7f8c8d';
-    ctx.fillRect(
-      canvas.width / 2 - crossSize / 2,
-      canvas.height / 2 - crossSize / 2,
-      crossSize,
-      crossSize
-    );
+    // ========== ОТРИСОВКА ДОРОГ И ПЕРЕКРЕСТКОВ ==========
+    if (networkType === 'grid' && network && network.intersections && network.intersections.length > 0) {
+      // Сетка перекрестков
+      const intersections = network.intersections;
 
-    ctx.strokeStyle = '#ecf0f1';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([5, 10]);
+      // Создаем карту уникальных координат для дорог
+      const horizontalRoads = new Map();
+      const verticalRoads = new Map();
 
-    ctx.beginPath();
-    ctx.moveTo(0, canvas.height / 2);
-    ctx.lineTo(canvas.width, canvas.height / 2);
-    ctx.stroke();
+      intersections.forEach(intersection => {
+        const x = intersection.x;
+        const y = intersection.y;
 
-    ctx.beginPath();
-    ctx.moveTo(canvas.width / 2, 0);
-    ctx.lineTo(canvas.width / 2, canvas.height);
-    ctx.stroke();
+        // Горизонтальные дороги (слева направо)
+        if (!horizontalRoads.has(y)) {
+          horizontalRoads.set(y, []);
+        }
+        horizontalRoads.get(y).push(x);
 
-    ctx.setLineDash([]);
+        // Вертикальные дороги (сверху вниз)
+        if (!verticalRoads.has(x)) {
+          verticalRoads.set(x, []);
+        }
+        verticalRoads.get(x).push(y);
+      });
 
+      // Рисуем горизонтальные дороги
+      horizontalRoads.forEach((xs, y) => {
+        if (xs.length >= 2) {
+          xs.sort((a, b) => a - b);
+          const minX = Math.min(...xs);
+          const maxX = Math.max(...xs);
+          const screenY = scaleY(y);
+          const screenStartX = scaleX(minX);
+          const screenEndX = scaleX(maxX);
+          ctx.fillRect(screenStartX - roadWidth/2, screenY - roadWidth/2,
+                       screenEndX - screenStartX + roadWidth, roadWidth);
+        }
+      });
+
+      // Рисуем вертикальные дороги
+      verticalRoads.forEach((ys, x) => {
+        if (ys.length >= 2) {
+          ys.sort((a, b) => a - b);
+          const minY = Math.min(...ys);
+          const maxY = Math.max(...ys);
+          const screenX = scaleX(x);
+          const screenStartY = scaleY(minY);
+          const screenEndY = scaleY(maxY);
+          ctx.fillRect(screenX - roadWidth/2, screenStartY - roadWidth/2,
+                       roadWidth, screenEndY - screenStartY + roadWidth);
+        }
+      });
+
+      // Рисуем перекрестки
+      intersections.forEach(intersection => {
+        const screenX = scaleX(intersection.x);
+        const screenY = scaleY(intersection.y);
+
+        ctx.fillStyle = '#7f8c8d';
+        ctx.fillRect(
+          screenX - crossSize/2,
+          screenY - crossSize/2,
+          crossSize,
+          crossSize
+        );
+
+        // Разметка перекрестка
+        ctx.strokeStyle = '#ecf0f1';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 10]);
+
+        ctx.beginPath();
+        ctx.moveTo(screenX - crossSize/2, screenY);
+        ctx.lineTo(screenX + crossSize/2, screenY);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(screenX, screenY - crossSize/2);
+        ctx.lineTo(screenX, screenY + crossSize/2);
+        ctx.stroke();
+
+        ctx.setLineDash([]);
+      });
+
+    } else if (roadConfig === 't_intersection' && networkType !== 'grid') {
+      // T-образный перекресток
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+
+      ctx.fillStyle = '#34495e';
+      ctx.fillRect(0, centerY - roadWidth/2, canvas.width, roadWidth);
+      ctx.fillRect(centerX - roadWidth/2, centerY, roadWidth, canvas.height - centerY);
+
+      ctx.fillStyle = '#7f8c8d';
+      ctx.fillRect(
+        centerX - crossSize / 2,
+        centerY - crossSize / 2,
+        crossSize,
+        crossSize
+      );
+
+      ctx.strokeStyle = '#ecf0f1';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 10]);
+
+      ctx.beginPath();
+      ctx.moveTo(0, centerY);
+      ctx.lineTo(canvas.width, centerY);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(centerX, 0);
+      ctx.lineTo(centerX, canvas.height);
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+
+    } else if (networkType !== 'grid') {
+      // Обычный перекресток
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+
+      ctx.fillStyle = '#34495e';
+      ctx.fillRect(0, centerY - roadWidth/2, canvas.width, roadWidth);
+      ctx.fillRect(centerX - roadWidth/2, 0, roadWidth, canvas.height);
+
+      ctx.fillStyle = '#7f8c8d';
+      ctx.fillRect(
+        centerX - crossSize / 2,
+        centerY - crossSize / 2,
+        crossSize,
+        crossSize
+      );
+
+      ctx.strokeStyle = '#ecf0f1';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 10]);
+
+      ctx.beginPath();
+      ctx.moveTo(0, centerY);
+      ctx.lineTo(canvas.width, centerY);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(centerX, 0);
+      ctx.lineTo(centerX, canvas.height);
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+    }
+
+    // ========== ОТРИСОВКА МАШИН ==========
     vehicles.forEach(vehicle => {
       const { x, y, color, speed, waiting_time: waitingTime } = vehicle;
 
-      const scaleX = (x / gridWidth) * canvas.width;
-      const scaleY = (y / gridHeight) * canvas.height;
+      const screenX = scaleX(x);
+      const screenY = scaleY(y);
 
-      const size = Math.max(3, Math.min(8, speed * 2));
+      // Проверяем, что машина в пределах видимой области (с небольшим запасом)
+      if (screenX < -50 || screenX > canvas.width + 50 ||
+          screenY < -50 || screenY > canvas.height + 50) {
+        return;
+      }
 
+      const size = Math.max(5, Math.min(12, speed * 3));
       const opacity = waitingTime > 0 ? 0.7 : 1;
 
       ctx.save();
@@ -82,28 +222,35 @@ const SimulationCanvas = ({
       ctx.fillStyle = color;
 
       ctx.beginPath();
-      ctx.arc(scaleX, scaleY, size, 0, Math.PI * 2);
+      ctx.arc(screenX, screenY, size, 0, Math.PI * 2);
       ctx.fill();
 
       ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 2;
       ctx.stroke();
 
       if (speed > 0) {
         ctx.fillStyle = '#fff';
-        ctx.font = '8px Arial';
+        ctx.font = '10px Arial';
         ctx.textAlign = 'center';
-        ctx.fillText(speed.toFixed(1), scaleX, scaleY + size + 10);
+        ctx.fillText(speed.toFixed(1), screenX, screenY + size + 12);
       }
 
       ctx.restore();
     });
 
+    // ========== ОТРИСОВКА СВЕТОФОРОВ ==========
     trafficLights.forEach(light => {
       const { x, y, state, direction, queue_length: queueLength } = light;
 
-      const scaleX = (x / gridWidth) * canvas.width;
-      const scaleY = (y / gridHeight) * canvas.height;
+      const screenX = scaleX(x);
+      const screenY = scaleY(y);
+
+      // Проверяем, что светофор в пределах видимой области
+      if (screenX < -50 || screenX > canvas.width + 50 ||
+          screenY < -50 || screenY > canvas.height + 50) {
+        return;
+      }
 
       const stateColors = {
         RED: '#ff4444',
@@ -111,53 +258,56 @@ const SimulationCanvas = ({
         GREEN: '#44ff44',
       };
 
-      const width = direction === 'horizontal' ? 20 : 8;
-      const height = direction === 'horizontal' ? 8 : 20;
+      const width = direction === 'horizontal' ? 30 : 12;
+      const height = direction === 'horizontal' ? 12 : 30;
 
       ctx.fillStyle = stateColors[state] || '#666';
       ctx.fillRect(
-        scaleX - width / 2,
-        scaleY - height / 2,
+        screenX - width / 2,
+        screenY - height / 2,
         width,
         height
       );
 
       ctx.strokeStyle = '#333';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 3;
       ctx.strokeRect(
-        scaleX - width / 2,
-        scaleY - height / 2,
+        screenX - width / 2,
+        screenY - height / 2,
         width,
         height
       );
 
+      // Отображение очереди над светофором
+      if (queueLength > 0) {
+        ctx.fillStyle = 'rgba(255, 100, 100, 0.9)';
+        ctx.beginPath();
+        ctx.arc(screenX, screenY - 25, 14, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 14px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(queueLength.toString(), screenX, screenY - 25);
+      }
+
+      // Мигание для желтого сигнала
       if (state === 'YELLOW') {
         ctx.save();
         ctx.globalAlpha = 0.5 + 0.5 * Math.sin(Date.now() / 500);
         ctx.fillStyle = '#fff';
         ctx.fillRect(
-          scaleX - width / 2 + 2,
-          scaleY - height / 2 + 2,
-          width - 4,
-          height - 4
+          screenX - width / 2 + 3,
+          screenY - height / 2 + 3,
+          width - 6,
+          height - 6
         );
         ctx.restore();
       }
-
-      if (queueLength > 0) {
-        ctx.fillStyle = 'rgba(255, 100, 100, 0.9)';
-        ctx.beginPath();
-        ctx.arc(scaleX, scaleY - 15, 10, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 10px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(queueLength.toString(), scaleX, scaleY - 15);
-      }
     });
-  }, [vehicles, trafficLights, gridWidth, gridHeight, isRunning]);
+
+  }, [vehicles, trafficLights, network, gridWidth, gridHeight, isRunning, roadConfig, networkType]);
 
   const handleCanvasClick = (e) => {
     if (!canvasRef.current || !onCanvasClick) return;
@@ -166,8 +316,11 @@ const SimulationCanvas = ({
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    const simX = (x / rect.width) * gridWidth;
-    const simY = (y / rect.height) * gridHeight;
+    const canvas = canvasRef.current;
+
+    // Преобразование экранных координат в координаты симуляции
+    const simX = (x / canvas.width) * gridWidth;
+    const simY = (y / canvas.height) * gridHeight;
 
     onCanvasClick(simX, simY);
   };
@@ -200,6 +353,7 @@ const SimulationCanvas = ({
         onClick={handleCanvasClick}
       />
 
+      {/* LIVE индикатор */}
       {isRunning && (
         <div
           style={{
@@ -231,6 +385,7 @@ const SimulationCanvas = ({
         </div>
       )}
 
+      {/* Информационная панель */}
       <div
         style={{
           position: 'absolute',
@@ -250,8 +405,12 @@ const SimulationCanvas = ({
         {simulationState.config?.algorithm && (
           <div>Algorithm: {simulationState.config.algorithm}</div>
         )}
+        {networkType === 'grid' && network && network.intersections && (
+          <div>Intersections: {network.intersections.length}</div>
+        )}
       </div>
 
+      {/* PAUSED индикатор */}
       {!isRunning && (
         <div
           style={{
@@ -270,6 +429,14 @@ const SimulationCanvas = ({
           ⏸️ PAUSED
         </div>
       )}
+
+      <style>{`
+        @keyframes pulse {
+          0% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.5; transform: scale(1.2); }
+          100% { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
     </div>
   );
 };
