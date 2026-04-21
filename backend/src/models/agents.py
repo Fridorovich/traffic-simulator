@@ -19,7 +19,7 @@ class LaneDirection(Enum):
 
 
 class VehicleAgent(mesa.Agent):
-    """Agent representing a vehicle with two-lane road system"""
+    """Agent representing a vehicle with support for turns on T-intersection and crossroads"""
 
     def __init__(self, unique_id: int, model, spawn_point: Tuple[int, int], lane: int, direction: LaneDirection):
         super().__init__(unique_id, model)
@@ -50,155 +50,120 @@ class VehicleAgent(mesa.Agent):
         self.SPEED_TO_KMPH = 10.0
 
         self.waiting_at_light = False
-        self.has_passed_light = False
+        self.passed_intersection = False   # флаг, что автомобиль уже проехал перекрёсток
 
-        grid_width = model.grid.width
-        grid_height = model.grid.height
-        center_x = grid_width // 2
-        center_y = grid_height // 2
-        lane_offset = 2.0
-
-        if direction == LaneDirection.RIGHT:
-            self.start_x = 0
-            self.end_x = grid_width - 1
-            self.start_y = center_y - lane_offset
-            self.end_y = self.start_y
-            self.intersection_x = center_x
-            self.intersection_y = self.start_y
-        elif direction == LaneDirection.LEFT:
-            self.start_x = grid_width - 1
-            self.end_x = 0
-            self.start_y = center_y + lane_offset
-            self.end_y = self.start_y
-            self.intersection_x = center_x
-            self.intersection_y = self.start_y
-        elif direction == LaneDirection.DOWN:
-            self.start_y = 0
-            self.end_y = grid_height - 1
-            self.start_x = center_x + lane_offset
-            self.end_x = self.start_x
-            self.intersection_x = self.start_x
-            self.intersection_y = center_y
-        else:  # UP
-            self.start_y = grid_height - 1
-            self.end_y = 0
-            self.start_x = center_x - lane_offset
-            self.end_x = self.start_x
-            self.intersection_x = self.start_x
-            self.intersection_y = center_y
-
-        self.position = [self.start_x, self.start_y]
-
+        # Инициализация маршрута и поиск светофора
+        self._init_path()
         self.traffic_light = self._find_first_traffic_light(model.traffic_lights)
 
-        self.route = [self.start, self.intersection, self.end]
-        self.current_segment = 0
-
     def _init_path(self):
-        """Initialize start and end points based on lane and direction"""
+        """Инициализация маршрута: start → intersection → (turn_point) → end"""
         grid_width = self.model.grid.width
         grid_height = self.model.grid.height
         center_x = grid_width // 2
         center_y = grid_height // 2
         lane_offset = 2.0
 
-        intersection_type = self.model.config.get("road_config", "crossroad")
+        road_config = self.model.config.get("road_config", "crossroad")
+        self.turn_point = None   # промежуточная точка после поворота (если нужна)
 
-        if self.direction == LaneDirection.RIGHT:
-            # Движение слева направо
-            self.start_x = 0
-            self.end_x = grid_width - 1
-            self.start_y = center_y - lane_offset
-            self.end_y = self.start_y
-            self.intersection_x = center_x
-            self.intersection_y = self.start_y
+        if road_config == "t_intersection":
+            # --- Т-образный перекрёсток ---
+            if self.direction == LaneDirection.RIGHT:
+                # Движение слева направо – только прямо
+                self.start_x = 0
+                self.start_y = center_y - lane_offset
+                self.intersection_x = center_x
+                self.intersection_y = self.start_y
+                self.end_x = grid_width - 1
+                self.end_y = self.start_y
+                self.turn_point = None
 
-        elif self.direction == LaneDirection.LEFT:
-            # Движение справа налево
-            self.start_x = grid_width - 1
-            self.end_x = 0
-            self.start_y = center_y + lane_offset
-            self.end_y = self.start_y
-            self.intersection_x = center_x
-            self.intersection_y = self.start_y
+            elif self.direction == LaneDirection.LEFT:
+                # Движение справа налево – только прямо
+                self.start_x = grid_width - 1
+                self.start_y = center_y + lane_offset
+                self.intersection_x = center_x
+                self.intersection_y = self.start_y
+                self.end_x = 0
+                self.end_y = self.start_y
+                self.turn_point = None
 
-        elif self.direction == LaneDirection.UP:
-            # Для T-образного перекрестка: движение снизу вверх с поворотом
-            if intersection_type == "t_intersection":
-                # Машины снизу поворачивают направо или налево
+            elif self.direction == LaneDirection.UP:
+                # Движение снизу вверх – поворот налево или направо в зависимости от полосы
                 self.start_y = grid_height - 1
-                # Определяем, налево или направо поворот
-                if self.lane == 0:  # Левая полоса -> поворот налево
-                    self.end_x = 0
-                    self.end_y = center_y + lane_offset
-                else:  # Правая полоса -> поворот направо
-                    self.end_x = grid_width - 1
-                    self.end_y = center_y - lane_offset
                 self.start_x = center_x + (lane_offset if self.lane == 1 else -lane_offset)
                 self.intersection_x = self.start_x
                 self.intersection_y = center_y
-            else:
-                # Обычный перекресток
-                self.start_y = grid_height - 1
-                self.end_y = 0
-                self.start_x = center_x - lane_offset
-                self.end_x = self.start_x
+
+                if self.lane == 0:  # левая полоса -> поворот налево
+                    self.end_x = 0
+                    self.end_y = center_y + lane_offset
+                    self.turn_point = (center_x - lane_offset, center_y + lane_offset)
+                else:  # правая полоса -> поворот направо
+                    self.end_x = grid_width - 1
+                    self.end_y = center_y - lane_offset
+                    self.turn_point = (center_x + lane_offset, center_y - lane_offset)
+
+            else:  # DOWN – на Т-образном перекрёстке движения сверху вниз нет
+                # Запасной вариант – поехать вниз до края (маловероятно)
+                self.start_x = center_x + (lane_offset if self.lane == 1 else -lane_offset)
+                self.start_y = 0
                 self.intersection_x = self.start_x
                 self.intersection_y = center_y
+                self.end_x = self.start_x
+                self.end_y = grid_height - 1
+                self.turn_point = None
+
+        else:
+            # --- Обычный перекрёсток (crossroad) ---
+            if self.direction == LaneDirection.RIGHT:
+                self.start_x = 0
+                self.start_y = center_y - lane_offset
+                self.intersection_x = center_x
+                self.intersection_y = self.start_y
+                self.end_x = grid_width - 1
+                self.end_y = self.start_y
+                self.turn_point = None
+
+            elif self.direction == LaneDirection.LEFT:
+                self.start_x = grid_width - 1
+                self.start_y = center_y + lane_offset
+                self.intersection_x = center_x
+                self.intersection_y = self.start_y
+                self.end_x = 0
+                self.end_y = self.start_y
+                self.turn_point = None
+
+            elif self.direction == LaneDirection.DOWN:
+                self.start_y = 0
+                self.start_x = center_x + lane_offset
+                self.intersection_x = self.start_x
+                self.intersection_y = center_y
+                self.end_x = self.start_x
+                self.end_y = grid_height - 1
+                self.turn_point = None
+
+            else:  # UP
+                self.start_y = grid_height - 1
+                self.start_x = center_x - lane_offset
+                self.intersection_x = self.start_x
+                self.intersection_y = center_y
+                self.end_x = self.start_x
+                self.end_y = 0
+                self.turn_point = None
 
         self.position = [self.start_x, self.start_y]
 
-    def _find_first_traffic_light(self, traffic_lights):
-        """Find the traffic light that is before the intersection on this vehicle's path"""
-        closest_light = None
-        min_distance = float('inf')
+        # Построение маршрута: start → intersection → (turn_point) → end
+        self.route = [self.start]
+        if self.intersection is not None:
+            self.route.append(self.intersection)
+        if self.turn_point:
+            self.route.append(self.turn_point)
+        self.route.append(self.end)
 
-        intersection_type = self.model.config.get("road_config", "crossroad")
-
-        for light in traffic_lights:
-            if self.direction_str in ["RIGHT", "LEFT"]:
-                if light.direction != "horizontal":
-                    continue
-                if abs(light.position[1] - self.intersection_y) > 3:
-                    continue
-
-                if self.direction_str == "RIGHT":
-                    if light.position[0] > self.start_x and light.position[0] < self.intersection_x:
-                        dist = light.position[0] - self.start_x
-                        if dist < min_distance:
-                            min_distance = dist
-                            closest_light = light
-                else:  # LEFT
-                    if light.position[0] < self.start_x and light.position[0] > self.intersection_x:
-                        dist = self.start_x - light.position[0]
-                        if dist < min_distance:
-                            min_distance = dist
-                            closest_light = light
-
-            else:  # Vertical movement
-                if light.direction != "vertical":
-                    continue
-                if abs(light.position[0] - self.intersection_x) > 3:
-                    continue
-
-                # Для T-образного перекрестка, если это верхнее направление - нет светофора
-                if intersection_type == "t_intersection" and self.direction_str == "UP":
-                    continue
-
-                if self.direction_str == "DOWN":
-                    if light.position[1] > self.start_y and light.position[1] < self.intersection_y:
-                        dist = light.position[1] - self.start_y
-                        if dist < min_distance:
-                            min_distance = dist
-                            closest_light = light
-                else:  # UP
-                    if light.position[1] < self.start_y and light.position[1] > self.intersection_y:
-                        dist = self.start_y - light.position[1]
-                        if dist < min_distance:
-                            min_distance = dist
-                            closest_light = light
-
-        return closest_light
+        self.current_segment = 0
 
     @property
     def start(self):
@@ -212,6 +177,67 @@ class VehicleAgent(mesa.Agent):
     def end(self):
         return (self.end_x, self.end_y)
 
+    def _find_first_traffic_light(self, traffic_lights):
+        """Найти светофор на пути автомобиля (перед пересечением)"""
+        closest_light = None
+        min_distance = float('inf')
+        road_config = self.model.config.get("road_config", "crossroad")
+
+        # --- Специальная обработка для Т-образного перекрёстка, направление UP ---
+        if road_config == "t_intersection" and self.direction == LaneDirection.UP:
+            for light in traffic_lights:
+                if light.direction != "vertical":
+                    continue
+                # Светофор для нижнего подхода имеет side="bottom"
+                if getattr(light, 'side', None) == "bottom":
+                    # Проверяем, что светофор находится между стартом и перекрёстком
+                    if (light.position[1] < self.start_y and
+                            light.position[1] > self.intersection_y):
+                        dist = self.start_y - light.position[1]
+                        if dist < min_distance:
+                            min_distance = dist
+                            closest_light = light
+            return closest_light
+
+        # --- Общая логика для остальных направлений и обычного перекрёстка ---
+        for light in traffic_lights:
+            if self.direction_str in ["RIGHT", "LEFT"]:
+                if light.direction != "horizontal":
+                    continue
+                if abs(light.position[1] - self.intersection_y) > 3:
+                    continue
+                if self.direction_str == "RIGHT":
+                    if light.position[0] > self.start_x and light.position[0] < self.intersection_x:
+                        dist = light.position[0] - self.start_x
+                        if dist < min_distance:
+                            min_distance = dist
+                            closest_light = light
+                else:  # LEFT
+                    if light.position[0] < self.start_x and light.position[0] > self.intersection_x:
+                        dist = self.start_x - light.position[0]
+                        if dist < min_distance:
+                            min_distance = dist
+                            closest_light = light
+            else:  # Vertical movement (UP/DOWN)
+                if light.direction != "vertical":
+                    continue
+                if abs(light.position[0] - self.intersection_x) > 3:
+                    continue
+                if self.direction_str == "DOWN":
+                    if light.position[1] > self.start_y and light.position[1] < self.intersection_y:
+                        dist = light.position[1] - self.start_y
+                        if dist < min_distance:
+                            min_distance = dist
+                            closest_light = light
+                else:  # UP (для обычного перекрёстка)
+                    if light.position[1] < self.start_y and light.position[1] > self.intersection_y:
+                        dist = self.start_y - light.position[1]
+                        if dist < min_distance:
+                            min_distance = dist
+                            closest_light = light
+
+        return closest_light
+
     def _generate_color(self):
         colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD"]
         return random.choice(colors)
@@ -220,10 +246,9 @@ class VehicleAgent(mesa.Agent):
         return np.sqrt((pos2[0] - pos1[0]) ** 2 + (pos2[1] - pos1[1]) ** 2)
 
     def _get_distance_to_light(self):
-        """Calculate distance to traffic light along the path"""
+        """Расстояние до светофора вдоль пути"""
         if not self.traffic_light:
             return float('inf')
-
         if self.direction_str == "RIGHT":
             return self.traffic_light.position[0] - self.position[0]
         elif self.direction_str == "LEFT":
@@ -234,10 +259,9 @@ class VehicleAgent(mesa.Agent):
             return self.position[1] - self.traffic_light.position[1]
 
     def _has_passed_light(self):
-        """Check if vehicle has passed the traffic light"""
+        """Проверка, проехал ли автомобиль светофор (упрощённо – по координатам)"""
         if not self.traffic_light:
             return True
-
         if self.direction_str == "RIGHT":
             return self.position[0] >= self.traffic_light.position[0]
         elif self.direction_str == "LEFT":
@@ -248,7 +272,7 @@ class VehicleAgent(mesa.Agent):
             return self.position[1] <= self.traffic_light.position[1]
 
     def _get_vehicle_ahead(self):
-        """Find the vehicle directly ahead on the same lane"""
+        """Поиск автомобиля впереди на том же маршрутном сегменте и полосе"""
         if not self.route or self.current_segment >= len(self.route):
             return None
 
@@ -258,12 +282,10 @@ class VehicleAgent(mesa.Agent):
         for vehicle in self.model.vehicles:
             if vehicle.unique_id == self.unique_id:
                 continue
-
             if vehicle.lane == self.lane and vehicle.direction_str == self.direction_str:
                 if vehicle.current_segment == self.current_segment:
                     dist_self = self._calculate_distance(self.position, current_target)
                     dist_other = self._calculate_distance(vehicle.position, current_target)
-
                     if dist_other < dist_self:
                         if self.direction_str == "RIGHT":
                             if vehicle.position[0] > self.position[0]:
@@ -286,14 +308,10 @@ class VehicleAgent(mesa.Agent):
     def _calculate_safe_speed(self, vehicle_ahead):
         if not vehicle_ahead:
             return self.max_speed
-
         distance = self._calculate_distance(self.position, vehicle_ahead.position)
-        safe_distance = self.safe_distance + self.speed * 2
-
-        if distance < 1.0:
-            return 0
-        elif distance < safe_distance * 0.5:
-            return 0
+        safe_distance = self.safe_distance + self.speed * 1.5
+        if distance < 0.5:
+            return 0.0
         elif distance < safe_distance:
             return self.max_speed * (distance / safe_distance)
         else:
@@ -302,18 +320,16 @@ class VehicleAgent(mesa.Agent):
     def _copert_co2_emission(self, speed, distance):
         if speed <= 0:
             return 0.02
-
         v = speed * self.SPEED_TO_KMPH
         numerator = self.COPERT['a'] * v ** 2 + self.COPERT['b'] * v + self.COPERT['c']
         denominator = 1 + self.COPERT['d'] * v + self.COPERT['e'] * v ** 2
         distance_km = distance * 0.1
-
         if denominator == 0:
             return 0
         return (numerator / denominator) * distance_km
 
     def move(self):
-        """Vehicle movement logic with collision avoidance"""
+        """Основная логика движения с учётом светофоров и поворотов"""
         was_moving = self.speed > 0
 
         if not self.route or self.current_segment >= len(self.route):
@@ -321,38 +337,33 @@ class VehicleAgent(mesa.Agent):
 
         target_pos = self.route[self.current_segment]
 
-        if self.traffic_light and self._has_passed_light():
-            self.waiting_at_light = False
+        # Определяем, приближается ли автомобиль к перекрёстку (для проверки светофора)
+        center_x = self.model.grid.width // 2
+        center_y = self.model.grid.height // 2
+        dist_to_center = self._calculate_distance(self.position, (center_x, center_y))
+        # Если ещё не проехали перекрёсток и расстояние до центра меньше 15 – приближаемся
+        approaching_intersection = (not self.passed_intersection) and (dist_to_center < 15)
 
-        vehicle_ahead = self._get_vehicle_ahead()
-        safe_speed = self._calculate_safe_speed(vehicle_ahead)
-
+        # Влияние светофора
         traffic_light_speed = self.max_speed
-
-        if self.current_segment == 1 and self.traffic_light and not self._has_passed_light():
+        if approaching_intersection and self.traffic_light and not self._has_passed_light():
             dist_to_light = self._get_distance_to_light()
-
-            if dist_to_light > 0 and dist_to_light < 4:
+            if dist_to_light < 8:
                 if self.traffic_light.state == TrafficLightState.RED:
                     self.waiting_at_light = True
                     if dist_to_light < 2.0:
                         traffic_light_speed = 0
                     elif dist_to_light < 8.0:
                         traffic_light_speed = self.max_speed * (dist_to_light / 8.0)
-                    else:
-                        traffic_light_speed = self.max_speed
-
                 elif self.traffic_light.state == TrafficLightState.YELLOW:
                     if dist_to_light < 4.0:
                         traffic_light_speed = 0
-                    else:
-                        traffic_light_speed = self.max_speed
                 else:  # GREEN
                     self.waiting_at_light = False
-                    if dist_to_light < 1.5:
-                        traffic_light_speed = self.max_speed
-                    else:
-                        traffic_light_speed = self.max_speed
+            else:
+                self.waiting_at_light = False
+        else:
+            self.waiting_at_light = False
 
         if self.waiting_at_light:
             self.speed = 0
@@ -361,8 +372,13 @@ class VehicleAgent(mesa.Agent):
             self.total_travel_time += 1
             return
 
+        # Автомобиль впереди
+        vehicle_ahead = self._get_vehicle_ahead()
+        safe_speed = self._calculate_safe_speed(vehicle_ahead)
+
         desired_speed = min(safe_speed, traffic_light_speed, self.max_speed)
 
+        # Плавное изменение скорости
         if desired_speed < self.speed:
             self.speed = max(desired_speed, self.speed - self.deceleration)
         elif desired_speed > self.speed:
@@ -371,24 +387,29 @@ class VehicleAgent(mesa.Agent):
         if self.speed < 0.01:
             self.speed = 0.0
 
+        # Достижение текущей точки маршрута
         distance_to_target = self._calculate_distance(self.position, target_pos)
-        if distance_to_target < 1.0:
+        if distance_to_target < 2.0:
             self.current_segment += 1
             if self.current_segment >= len(self.route):
+                # Завершение маршрута
                 self.model.vehicle_completed(self)
                 return
             target_pos = self.route[self.current_segment]
 
+        # Фиксация проезда перекрёстка (центр сетки)
+        if not self.passed_intersection and dist_to_center < 2.0:
+            self.passed_intersection = True
+
+        # Движение к цели
         if self.speed > 0:
             dx = target_pos[0] - self.position[0]
             dy = target_pos[1] - self.position[1]
-
             if abs(dx) > 0 or abs(dy) > 0:
                 norm = np.sqrt(dx ** 2 + dy ** 2)
                 if norm > 0:
                     dx /= norm
                     dy /= norm
-
                 new_x = self.position[0] + dx * self.speed
                 new_y = self.position[1] + dy * self.speed
                 new_position = (new_x, new_y)
@@ -396,14 +417,13 @@ class VehicleAgent(mesa.Agent):
                 if not self.model.is_position_occupied((new_x, new_y), self.unique_id):
                     distance_traveled = self._calculate_distance(self.position, (new_x, new_y))
                     self.position = [new_x, new_y]
-
                     co2 = self._copert_co2_emission(self.speed, distance_traveled)
                     self.total_co2_emission += co2
                 else:
                     self.speed = 0
 
+        # Обновление состояния (остановка, подсчёт времени ожидания)
         self.stopped = (self.speed == 0)
-
         if was_moving and self.stopped:
             self.number_of_stops += 1
             self.waiting_time += 1
@@ -448,6 +468,12 @@ class TrafficLightAgent(mesa.Agent):
                     queue += 1
         self.max_queue_length = max(self.max_queue_length, queue)
         return int(queue)
+
+    def get_traffic_light_by_id(self, light_id):
+        for light in self.traffic_lights:
+            if light.unique_id == light_id:
+                return light
+        return None
 
     def _is_in_queue(self, vehicle: VehicleAgent) -> bool:
         """Check if vehicle is in queue for this traffic light"""

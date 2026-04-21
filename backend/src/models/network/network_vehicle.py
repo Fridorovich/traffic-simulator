@@ -1,35 +1,53 @@
+# network_vehicle.py
+
 from typing import List, Tuple, Optional
 import numpy as np
+import random
 from ..agents import VehicleAgent, LaneDirection, TrafficLightState
 
 
 class NetworkVehicleAgent(VehicleAgent):
-    """Vehicle that navigates through multiple intersections"""
+    """Vehicle that follows a precomputed path through the road network"""
 
     def __init__(self, unique_id: int, model, spawn_point: Tuple[float, float],
                  lane: int, direction: LaneDirection, network, destination: Tuple[float, float]):
         super().__init__(unique_id, model, spawn_point, lane, direction)
         self.network = network
-        self.destination = destination
+        self.final_destination = destination
 
         # Find start and end intersections
         self.start_intersection = self._find_closest_intersection(spawn_point)
         self.end_intersection = self._find_closest_intersection(destination)
 
-        # Find path through network
-        self.path = self._find_path()
+        print(f"\n=== NEW VEHICLE {unique_id} ===")
+        print(f"Spawn point: {spawn_point}")
+        print(f"Initial direction: {direction}")
+        print(
+            f"Start intersection: {self.start_intersection.id} ({self.start_intersection.x}, {self.start_intersection.y})")
+        print(f"End intersection: {self.end_intersection.id} ({self.end_intersection.x}, {self.end_intersection.y})")
+
+        # Initialize default values
+        self.current_road = None
+        self.current_direction_str = direction.value
+        self.traffic_light = None
+        self.current_target_index = 0
+        self.path = None
+
+        # Find path using A*
+        if self.start_intersection.id != self.end_intersection.id:
+            self.path = self._find_path()
 
         if self.path and len(self.path) > 1:
-            self.current_target_index = 1  # Next intersection to go to
-            self.current_target = self._get_intersection_position(self.path[self.current_target_index])
-            self.current_road = self._get_road_between(self.path[0], self.path[1])
-            self.traffic_light = self.current_road.get_traffic_light_for_entry() if self.current_road else None
+            print(f"Path found: {self.path}")
+            self.current_target_index = 1
+            self._update_target()
         else:
-            # Direct path (no intersections in between)
+            print("No path found - going directly to destination")
             self.current_target = destination
             self.traffic_light = None
+            self.current_road = None
 
-        self.current_segment = 0  # 0 = moving to intersection, 1 = after intersection
+        # State flags
         self.waiting_at_light = False
 
     def _find_closest_intersection(self, point: Tuple[float, float]):
@@ -44,32 +62,16 @@ class NetworkVehicleAgent(VehicleAgent):
         return closest
 
     def _find_path(self):
-        """Find path from start to end intersection"""
+        """Find path from start to end intersection using A*"""
         if not self.start_intersection or not self.end_intersection:
             return None
 
-        # Simple BFS path finding
-        from collections import deque
-        queue = deque([(self.start_intersection.id, [self.start_intersection.id])])
-        visited = {self.start_intersection.id}
-
-        while queue:
-            node_id, path = queue.popleft()
-
-            if node_id == self.end_intersection.id:
-                return path
-
-            for neighbor_id in self.network.get_neighbors(node_id):
-                if neighbor_id not in visited:
-                    visited.add(neighbor_id)
-                    queue.append((neighbor_id, path + [neighbor_id]))
-
-        return None
-
-    def _get_intersection_position(self, intersection_id: int) -> Tuple[float, float]:
-        """Get position of intersection by ID"""
-        node = self.network.get_intersection(intersection_id)
-        return (node.x, node.y) if node else (0, 0)
+        # Use PathFinder
+        path = self.network.path_finder.find_path(
+            self.start_intersection.id,
+            self.end_intersection.id
+        )
+        return path
 
     def _get_road_between(self, from_id: int, to_id: int):
         """Get road segment between two intersections"""
@@ -78,49 +80,96 @@ class NetworkVehicleAgent(VehicleAgent):
                 return road
         return None
 
+    def _get_traffic_light_for_road(self, road):
+        """Get traffic light at the end of the road"""
+        if road:
+            return road.to_node.get_traffic_light_for_direction(road.direction)
+        return None
+
+    def _update_target(self):
+        """Update current target to next point in path"""
+        if self.current_target_index < len(self.path):
+            current_node_id = self.path[self.current_target_index - 1]
+            next_node_id = self.path[self.current_target_index]
+
+            self.current_intersection = self.network.get_intersection(current_node_id)
+            self.target_intersection = self.network.get_intersection(next_node_id)
+
+            # Get road and determine direction
+            self.current_road = self._get_road_between(current_node_id, next_node_id)
+            if self.current_road:
+                # current_direction is a string from road.direction
+                self.current_direction_str = self.current_road.direction
+                self.direction_str = self.current_road.direction
+                # Also update direction as LaneDirection enum for compatibility
+                if self.current_road.direction == "RIGHT":
+                    self.direction = LaneDirection.RIGHT
+                elif self.current_road.direction == "LEFT":
+                    self.direction = LaneDirection.LEFT
+                elif self.current_road.direction == "DOWN":
+                    self.direction = LaneDirection.DOWN
+                else:  # UP
+                    self.direction = LaneDirection.UP
+                self.traffic_light = self._get_traffic_light_for_road(self.current_road)
+
+            self.current_target = (self.target_intersection.x, self.target_intersection.y)
+
+            print(
+                f"  Target {self.current_target_index}: go to intersection {next_node_id} ({self.current_target[0]}, {self.current_target[1]}) direction {self.current_direction_str}")
+        else:
+            # Last segment - go to final destination
+            self.current_target = self.final_destination
+            self.traffic_light = None
+            self.current_road = None
+            print(f"  Final target: ({self.current_target[0]}, {self.current_target[1]})")
+
+    def _advance_to_next_target(self):
+        """Move to next point in the path"""
+        self.current_target_index += 1
+
+        if self.path and self.current_target_index < len(self.path):
+            self._update_target()
+        else:
+            # Reached final intersection, now go to destination
+            self.current_target = self.final_destination
+            self.traffic_light = None
+            self.current_road = None
+            print(
+                f"  Reached final intersection, going to destination ({self.current_target[0]}, {self.current_target[1]})")
+
     def _get_distance_to_target(self):
         """Get distance to current target"""
         return self._calculate_distance(self.position, self.current_target)
 
     def move(self):
-        """Movement logic for network vehicle"""
+        """Movement logic following precomputed path"""
         was_moving = self.speed > 0
 
         # Check if reached current target
         distance_to_target = self._get_distance_to_target()
 
         if distance_to_target < 1.0:
-            # Reached current target (intersection or destination)
-            if self.current_segment == 0:
-                # At intersection, move to next segment
-                self.current_segment = 1
-
-                # Move to next intersection in path
-                if self.current_target_index < len(self.path) - 1:
-                    self.current_target_index += 1
-                    self.current_target = self._get_intersection_position(self.path[self.current_target_index])
-                    self.current_road = self._get_road_between(
-                        self.path[self.current_target_index - 1],
-                        self.path[self.current_target_index]
-                    )
-                    self.traffic_light = self.current_road.get_traffic_light_for_entry() if self.current_road else None
-                    self.current_segment = 0  # Start approaching next intersection
-                else:
-                    # Reached final destination
-                    self.model.vehicle_completed(self)
-                    return
-            else:
-                # Reached final destination
+            # Check if reached final destination
+            if self.current_target == self.final_destination:
+                print(f"Vehicle {self.unique_id} reached final destination!")
                 self.model.vehicle_completed(self)
                 return
 
-        # Check vehicle ahead
-        vehicle_ahead = self._get_vehicle_ahead()
-        safe_speed = self._calculate_safe_speed(vehicle_ahead)
+            # Reached an intersection - advance to next target
+            self._advance_to_next_target()
+            return
 
-        # Traffic light influence (only when approaching intersection)
+        # Get vehicle ahead on same road (only if we have a road)
+        vehicle_ahead = None
+        safe_speed = self.max_speed
+
+        if self.current_road:
+            vehicle_ahead = self._get_vehicle_ahead()
+            safe_speed = self._calculate_safe_speed(vehicle_ahead)
+
+        # Traffic light influence
         traffic_light_speed = self.max_speed
-        if self.current_segment == 0 and self.traffic_light:
+        if self.traffic_light and self.current_target != self.final_destination:
             dist_to_light = self._calculate_distance(self.position, self.traffic_light.position)
 
             if dist_to_light < 15:
@@ -173,7 +222,7 @@ class NetworkVehicleAgent(VehicleAgent):
                 new_y = self.position[1] + dy * self.speed
 
                 # Don't go past traffic light
-                if self.current_segment == 0 and self.traffic_light:
+                if self.traffic_light and self.current_target != self.final_destination:
                     dist_to_light = self._calculate_distance((new_x, new_y), self.traffic_light.position)
                     if dist_to_light < 0.5 and self.traffic_light.state != TrafficLightState.GREEN:
                         if self.direction_str == "RIGHT":
@@ -218,30 +267,30 @@ class NetworkVehicleAgent(VehicleAgent):
             if vehicle.unique_id == self.unique_id:
                 continue
 
-            # Check if vehicle is on same path and heading same direction
-            if hasattr(vehicle, 'path') and vehicle.path and self.path:
-                # Check if they are on the same road segment
-                if (vehicle.current_target_index == self.current_target_index and
-                        vehicle.current_target == self.current_target):
+            # Check if vehicle is on same path segment
+            if (hasattr(vehicle, 'current_road') and
+                    vehicle.current_road == self.current_road and
+                    hasattr(vehicle, 'current_target_index') and
+                    vehicle.current_target_index == self.current_target_index):
 
-                    if self.direction_str in ["RIGHT", "LEFT"]:
-                        if self.direction_str == "RIGHT":
-                            if vehicle.position[0] > self.position[0]:
-                                distance = vehicle.position[0] - self.position[0]
-                                vehicles_ahead.append((distance, vehicle))
-                        else:
-                            if vehicle.position[0] < self.position[0]:
-                                distance = self.position[0] - vehicle.position[0]
-                                vehicles_ahead.append((distance, vehicle))
+                if self.direction_str in ["RIGHT", "LEFT"]:
+                    if self.direction_str == "RIGHT":
+                        if vehicle.position[0] > self.position[0]:
+                            distance = vehicle.position[0] - self.position[0]
+                            vehicles_ahead.append((distance, vehicle))
                     else:
-                        if self.direction_str == "DOWN":
-                            if vehicle.position[1] > self.position[1]:
-                                distance = vehicle.position[1] - self.position[1]
-                                vehicles_ahead.append((distance, vehicle))
-                        else:
-                            if vehicle.position[1] < self.position[1]:
-                                distance = self.position[1] - vehicle.position[1]
-                                vehicles_ahead.append((distance, vehicle))
+                        if vehicle.position[0] < self.position[0]:
+                            distance = self.position[0] - vehicle.position[0]
+                            vehicles_ahead.append((distance, vehicle))
+                else:
+                    if self.direction_str == "DOWN":
+                        if vehicle.position[1] > self.position[1]:
+                            distance = vehicle.position[1] - self.position[1]
+                            vehicles_ahead.append((distance, vehicle))
+                    else:
+                        if vehicle.position[1] < self.position[1]:
+                            distance = self.position[1] - vehicle.position[1]
+                            vehicles_ahead.append((distance, vehicle))
 
         if vehicles_ahead:
             vehicles_ahead.sort(key=lambda x: x[0])

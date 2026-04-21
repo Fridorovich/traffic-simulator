@@ -40,7 +40,7 @@ const SimulationCanvas = ({
     ctx.fillStyle = '#2c3e50';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Функции масштабирования - простое линейное преобразование
+    // Простые функции масштабирования
     const scaleX = (x) => (x / gridWidth) * canvas.width;
     const scaleY = (y) => (y / gridHeight) * canvas.height;
 
@@ -62,13 +62,11 @@ const SimulationCanvas = ({
         const x = intersection.x;
         const y = intersection.y;
 
-        // Горизонтальные дороги (слева направо)
         if (!horizontalRoads.has(y)) {
           horizontalRoads.set(y, []);
         }
         horizontalRoads.get(y).push(x);
 
-        // Вертикальные дороги (сверху вниз)
         if (!verticalRoads.has(x)) {
           verticalRoads.set(x, []);
         }
@@ -116,7 +114,6 @@ const SimulationCanvas = ({
           crossSize
         );
 
-        // Разметка перекрестка
         ctx.strokeStyle = '#ecf0f1';
         ctx.lineWidth = 1;
         ctx.setLineDash([5, 10]);
@@ -205,10 +202,11 @@ const SimulationCanvas = ({
     vehicles.forEach(vehicle => {
       const { x, y, color, speed, waiting_time: waitingTime } = vehicle;
 
+      // Прямое масштабирование координат
       const screenX = scaleX(x);
       const screenY = scaleY(y);
 
-      // Проверяем, что машина в пределах видимой области (с небольшим запасом)
+      // Пропускаем машины за пределами экрана
       if (screenX < -50 || screenX > canvas.width + 50 ||
           screenY < -50 || screenY > canvas.height + 50) {
         return;
@@ -246,7 +244,6 @@ const SimulationCanvas = ({
       const screenX = scaleX(x);
       const screenY = scaleY(y);
 
-      // Проверяем, что светофор в пределах видимой области
       if (screenX < -50 || screenX > canvas.width + 50 ||
           screenY < -50 || screenY > canvas.height + 50) {
         return;
@@ -278,7 +275,6 @@ const SimulationCanvas = ({
         height
       );
 
-      // Отображение очереди над светофором
       if (queueLength > 0) {
         ctx.fillStyle = 'rgba(255, 100, 100, 0.9)';
         ctx.beginPath();
@@ -292,7 +288,6 @@ const SimulationCanvas = ({
         ctx.fillText(queueLength.toString(), screenX, screenY - 25);
       }
 
-      // Мигание для желтого сигнала
       if (state === 'YELLOW') {
         ctx.save();
         ctx.globalAlpha = 0.5 + 0.5 * Math.sin(Date.now() / 500);
@@ -318,7 +313,6 @@ const SimulationCanvas = ({
 
     const canvas = canvasRef.current;
 
-    // Преобразование экранных координат в координаты симуляции
     const simX = (x / canvas.width) * gridWidth;
     const simY = (y / canvas.height) * gridHeight;
 
@@ -353,7 +347,6 @@ const SimulationCanvas = ({
         onClick={handleCanvasClick}
       />
 
-      {/* LIVE индикатор */}
       {isRunning && (
         <div
           style={{
@@ -385,7 +378,6 @@ const SimulationCanvas = ({
         </div>
       )}
 
-      {/* Информационная панель */}
       <div
         style={{
           position: 'absolute',
@@ -410,7 +402,32 @@ const SimulationCanvas = ({
         )}
       </div>
 
-      {/* PAUSED индикатор */}
+      {/* Отладочная панель - показывает координаты машин */}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: '10px',
+          right: '10px',
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          color: 'white',
+          padding: '8px 12px',
+          borderRadius: '6px',
+          fontSize: '10px',
+          fontFamily: 'monospace',
+          zIndex: 100,
+          maxWidth: '250px',
+          maxHeight: '150px',
+          overflow: 'auto'
+        }}
+      >
+        <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>Vehicles:</div>
+        {vehicles.length === 0 && <div>No vehicles</div>}
+        {vehicles.slice(0, 5).map(v => (
+          <div key={v.id}>#{v.id}: ({Math.round(v.x)}, {Math.round(v.y)}) {v.direction}</div>
+        ))}
+        {vehicles.length > 5 && <div>...and {vehicles.length - 5} more</div>}
+      </div>
+
       {!isRunning && (
         <div
           style={{

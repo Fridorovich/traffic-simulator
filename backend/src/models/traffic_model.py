@@ -19,7 +19,9 @@ class TrafficModel(mesa.Model):
             "algorithm_config": {},
             "spawn_rate": 0.1,
             "simulation_speed": 1,
-            "road_config": "crossroad"
+            "road_config": "crossroad",
+            "network_type": "single",
+            "network_config": {"rows": 3, "cols": 3, "spacing": 20}
         }
 
         self.config = {**self.default_config, **(config or {})}
@@ -33,6 +35,9 @@ class TrafficModel(mesa.Model):
 
         self.vehicles: List[VehicleAgent] = []
         self.traffic_lights: List[TrafficLightAgent] = []
+
+        self.network = None
+        self.network_type = self.config.get("network_type", "single")
 
         self.completed_vehicles = 0
         self.spawned_vehicles = 0
@@ -197,6 +202,7 @@ class TrafficModel(mesa.Model):
     def _spawn_vehicle(self, vehicle_id: int) -> bool:
         """Create new vehicle based on configuration"""
         if self.network:
+            print("ss")
             return self._spawn_vehicle_network(vehicle_id)
         elif self.config.get("road_config") == "t_intersection":
             return self._spawn_vehicle_t_intersection(vehicle_id)
@@ -207,14 +213,13 @@ class TrafficModel(mesa.Model):
         """Update simulation configuration"""
         allowed_params = [
             "num_vehicles", "spawn_rate", "simulation_speed",
-            "road_config", "algorithm_config", "algorithm"
+            "road_config", "algorithm_config", "algorithm",
+
         ]
 
-        # Проверяем, меняется ли road_config
         old_road_config = self.config.get("road_config")
         new_road_config = config_update.get("road_config")
 
-        # Если меняется тип перекрестка, нужно пересоздать сеть
         if new_road_config and new_road_config != old_road_config:
             self._rebuild_road_network(new_road_config)
 
@@ -300,15 +305,6 @@ class TrafficModel(mesa.Model):
                     self.vehicles.remove(vehicle)
                     self.schedule.remove(vehicle)
                     self.grid.remove_agent(vehicle)
-
-    def _spawn_vehicle(self, vehicle_id: int) -> bool:
-        """Create new vehicle based on current road configuration"""
-        road_config = self.config.get("road_config", "crossroad")
-
-        if road_config == "t_intersection":
-            return self._spawn_vehicle_t_intersection(vehicle_id)
-        else:
-            return self._spawn_vehicle_crossroad(vehicle_id)
 
     def _spawn_vehicle_t_intersection(self, vehicle_id: int) -> bool:
         """Create new vehicle for T-shaped intersection (3-way)"""

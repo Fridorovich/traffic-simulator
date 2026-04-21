@@ -16,9 +16,11 @@ class RoadNetwork:
         self.roads: List[RoadSegment] = []
         self.path_finder = PathFinder(self)
         self.config = config
+        self.path_finder = PathFinder(self)
 
         # Build network from config
         self._build_network()
+
 
     def _build_network(self):
         """Build network from configuration"""
@@ -88,56 +90,119 @@ class RoadNetwork:
         return None
 
     def spawn_vehicle_on_network(self, vehicle_id: int) -> bool:
-        """Spawn a vehicle on the road network"""
+        """Spawn a vehicle at spawn points (edges of the network)"""
         if len(self.model.vehicles) > 100:
             return False
 
+        # Use spawn points from config
         if not self.config.spawn_points:
+            print("No spawn points available!")
             return False
 
-        spawn_info = random.choice(self.config.spawn_points)
-        x, y, direction_str = spawn_info
+        # Get all spawn points and shuffle them
+        available_spawns = list(self.config.spawn_points)
+        random.shuffle(available_spawns)
 
-        # Convert direction string to LaneDirection
-        direction_map = {
-            "RIGHT": LaneDirection.RIGHT,
-            "LEFT": LaneDirection.LEFT,
-            "UP": LaneDirection.UP,
-            "DOWN": LaneDirection.DOWN
-        }
+        for spawn_info in available_spawns:
+            x, y, direction_str = spawn_info
 
-        direction = direction_map[direction_str]
-        lane = random.randint(0, 1)
-        lane_offset = 2.0
+            # Adjust position for lane
+            direction_map = {
+                "RIGHT": LaneDirection.RIGHT,
+                "LEFT": LaneDirection.LEFT,
+                "UP": LaneDirection.UP,
+                "DOWN": LaneDirection.DOWN
+            }
+            direction = direction_map[direction_str]
+            lane = random.randint(0, 1)
+            lane_offset = 2.0
 
-        # Adjust spawn position based on lane
-        if direction_str in ["RIGHT", "LEFT"]:
-            y = y + (lane_offset if lane == 1 else -lane_offset)
-        else:
-            x = x + (lane_offset if lane == 1 else -lane_offset)
+            # Calculate actual spawn position with lane offset
+            if direction_str in ["RIGHT", "LEFT"]:
+                spawn_x = x
+                spawn_y = y + (lane_offset if lane == 1 else -lane_offset)
+            else:
+                spawn_x = x + (lane_offset if lane == 1 else -lane_offset)
+                spawn_y = y
 
-        # Find random destination point
-        if self.config.despawn_points:
-            dest_x, dest_y = random.choice(self.config.despawn_points)
-        else:
-            dest_x, dest_y = x + 50, y + 50
+            # Check if spawn point is occupied
+            point_occupied = False
+            for vehicle in self.model.vehicles:
+                if abs(vehicle.position[0] - spawn_x) < 2 and abs(vehicle.position[1] - spawn_y) < 2:
+                    point_occupied = True
+                    break
 
-        # Create vehicle
-        vehicle = NetworkVehicleAgent(
-            unique_id=vehicle_id,
-            model=self.model,
-            spawn_point=(x, y),
-            lane=lane,
-            direction=direction,
-            network=self,
-            destination=(dest_x, dest_y)
-        )
+            if point_occupied:
+                continue  # Try next spawn point
 
-        self.model.vehicles.append(vehicle)
-        self.model.schedule.add(vehicle)
-        self.model.grid.place_agent(vehicle, (x, y))
-        self.model.spawned_vehicles += 1
-        return True
+            print(f"Spawning vehicle {vehicle_id} at spawn point ({spawn_x}, {spawn_y}) direction {direction_str}")
+
+            # Find destination (random despawn point on opposite side)
+            if self.config.despawn_points:
+                dest_x, dest_y = random.choice(self.config.despawn_points)
+            else:
+                # Fallback: go to opposite side of the network
+                if direction == LaneDirection.RIGHT:
+                    dest_x = max([n.x for n in self.intersections.values()]) + 20
+                    dest_y = spawn_y
+                elif direction == LaneDirection.LEFT:
+                    dest_x = min([n.x for n in self.intersections.values()]) - 20
+                    dest_y = spawn_y
+                elif direction == LaneDirection.DOWN:
+                    dest_y = max([n.y for n in self.intersections.values()]) + 20
+                    dest_x = spawn_x
+                else:  # UP
+                    dest_y = min([n.y for n in self.intersections.values()]) - 20
+                    dest_x = spawn_x
+
+            print(f"  Destination: ({dest_x}, {dest_y})")
+
+            # Create vehicle
+            vehicle = NetworkVehicleAgent(
+                unique_id=vehicle_id,
+                model=self.model,
+                spawn_point=(spawn_x, spawn_y),
+                lane=lane,
+                direction=direction,
+                network=self,
+                destination=(dest_x, dest_y)
+            )
+
+            self.model.vehicles.append(vehicle)
+            self.model.schedule.add(vehicle)
+            self.model.grid.place_agent(vehicle, (spawn_x, spawn_y))
+            self.model.spawned_vehicles += 1
+            return True
+
+        print(f"All spawn points occupied! Could not spawn vehicle {vehicle_id}")
+        return False
+
+    def _get_next_intersection_from_node(self, node, direction: LaneDirection):
+        """Get next intersection from a given node in specified direction"""
+        x, y = node.x, node.y
+
+        candidates = []
+        for other in self.intersections.values():
+            if other.id == node.id:
+                continue
+
+            if direction == LaneDirection.RIGHT:
+                if abs(other.y - y) < 5 and other.x > x:
+                    candidates.append((other.x - x, other))
+            elif direction == LaneDirection.LEFT:
+                if abs(other.y - y) < 5 and other.x < x:
+                    candidates.append((x - other.x, other))
+            elif direction == LaneDirection.DOWN:
+                if abs(other.x - x) < 5 and other.y > y:
+                    candidates.append((other.y - y, other))
+            elif direction == LaneDirection.UP:
+                if abs(other.x - x) < 5 and other.y < y:
+                    candidates.append((y - other.y, other))
+
+        if candidates:
+            candidates.sort(key=lambda c: c[0])
+            return candidates[0][1]
+        return None
 
     def get_state_dict(self) -> Dict:
         """Get network state for API - без дублирования"""
